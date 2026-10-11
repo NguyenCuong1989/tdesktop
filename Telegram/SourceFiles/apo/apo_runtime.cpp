@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apo/apo_behavior_ledger.h"
 #include "apo/apo_authority.h"
 #include "apo/apo_state_bridge.h"
+#include "apo/apo_cognitive_loop.h"
 
 namespace apo {
 
@@ -49,6 +50,9 @@ void Runtime::start() {
 		onHeartbeatTick();
 	});
 	_heartbeatTimer->start(5000);
+
+	// Start native cognitive agent loop
+	CognitiveLoop::Instance().start(10000);
 }
 
 void Runtime::stop() {
@@ -56,6 +60,8 @@ void Runtime::stop() {
 		return;
 	}
 	_running = false;
+
+	CognitiveLoop::Instance().stop();
 
 	if (_heartbeatTimer) {
 		_heartbeatTimer->stop();

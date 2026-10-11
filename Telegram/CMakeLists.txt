@@ -127,6 +127,12 @@ PRIVATE
     apo/apo_behavior_ledger.cpp
     apo/apo_state_bridge.h
     apo/apo_state_bridge.cpp
+    apo/apo_economy_state.h
+    apo/apo_economy_state.cpp
+    apo/apo_verifier.h
+    apo/apo_verifier.cpp
+    apo/apo_cognitive_loop.h
+    apo/apo_cognitive_loop.cpp
     apo/apo_runtime.h
     apo/apo_runtime.cpp
     apo/apo_executor.h
