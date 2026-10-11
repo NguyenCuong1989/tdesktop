@@ -63,7 +63,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Auditing choke points wiring in upstream Telegram source..." -ForegroundColor Cyan
-          
+
           # Check Core Application start/stop
           $app = Get-Content Telegram/SourceFiles/core/application.cpp -Raw
           if ($app -match "apo::Runtime::Instance\(\)\.start\(\)") {
