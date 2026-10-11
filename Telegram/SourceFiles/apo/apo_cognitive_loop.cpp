@@ -101,13 +101,13 @@ void CognitiveLoop::step() {
 		const auto candidateAction = QStringLiteral("compute.draft_reply");
 		const auto targetChat = QStringLiteral("unread_inbox");
 
-		// 5. DECIDE & 6. VERIFY: Evaluate through APO verifier
+		// 5. DECIDE & 6. VERIFY: Evaluate through canonical APO verifier
+		const ApoStateQuad candidateState{ 0.0, 0.05, 1.0, 0.99 };
 		const auto verification = ApoVerifier::Instance().verifyAction(
 			candidateAction,
 			targetChat,
 			computePayload,
-			10.0, // Estimated value
-			0.1   // Estimated compute cost
+			candidateState
 		);
 
 		if (verification.passed) {

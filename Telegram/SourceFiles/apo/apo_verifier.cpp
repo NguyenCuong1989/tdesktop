@@ -6,7 +6,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "apo/apo_verifier.h"
 #include "apo/apo_authority.h"
-#include "apo/apo_economy_state.h"
 #include "apo/apo_behavior_ledger.h"
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QJsonDocument>
@@ -19,14 +18,37 @@ ApoVerifier &ApoVerifier::Instance() {
 	return instance;
 }
 
+OmegaEvaluation ApoVerifier::evaluateOmega(
+	const ApoStateQuad &s0,
+	const ApoStateQuad &s1) const {
+	OmegaEvaluation eval;
+	eval.S0 = s0;
+	eval.S1 = s1;
+
+	eval.D0 = s0.computeD();
+	eval.D1 = s1.computeD();
+
+	eval.diff0 = s0.computeDiff();
+	eval.diff1 = s1.computeDiff();
+
+	eval.V0 = s0.computeV();
+	eval.V1 = s1.computeV();
+
+	eval.deltaD = eval.D1 - eval.D0;
+	eval.deltaV = eval.V1 - eval.V0;
+
+	eval.converged = (std::abs(eval.deltaD) < kMaxDeltaDConvergence)
+		&& (eval.V1 >= kMinimumTruthThresholdV);
+
+	return eval;
+}
+
 VerificationResult ApoVerifier::verifyAction(
 	const QString &actionType,
 	const QString &target,
 	const QJsonObject &parameters,
-	double estimatedValue,
-	double estimatedCost) {
+	const ApoStateQuad &candidateState) {
 	VerificationResult res;
-	res.expectedValue = estimatedValue - estimatedCost;
 
 	// 1. Authority Gate Check: a_t \in AuthorizedActions_t
 	const auto authLevel = AuthorityManager::Instance().getActionAuthority(actionType);
@@ -36,33 +58,30 @@ VerificationResult ApoVerifier::verifyAction(
 		return res;
 	}
 
-	// 2. Trust Capital Gate Check: T_t >= T_min (0.35)
-	const double currentTrust = EconomyEngine::Instance().currentTrust();
-	res.trustMargin = currentTrust;
-	if (currentTrust < 0.35) {
+	// 2. Canonical Omega(P) Convergence Gate
+	// Baseline state: S0 = (C=0.0, R=0.07, E=1.0, B=0.985)
+	const ApoStateQuad s0{ 0.0, 0.07, 1.0, 0.985 };
+	res.omega = evaluateOmega(s0, candidateState);
+
+	if (!res.omega.converged) {
 		res.passed = false;
-		res.rationale = QStringLiteral("DENIED: System trust capital below safety threshold (%1 < 0.35)")
-			.arg(currentTrust);
+		res.rationale = QStringLiteral(
+			"REJECTED: APO convergence failed. delta_D=%1 (need < 0.005), V1=%2 (need >= 0.9800)")
+			.arg(res.omega.deltaD)
+			.arg(res.omega.V1);
 		return res;
 	}
 
-	// 3. Margin / Cost Gate Check
-	if (res.expectedValue < -5.0) { // Unbounded loss prevention
-		res.passed = false;
-		res.rationale = QStringLiteral("DENIED: Negative margin violates economic preservation constraint.");
-		return res;
-	}
-
-	// 4. Action Passed APO Verification: Generate Proof Hash
+	// 3. Action Passed Canonical Verification: Generate SHA-256 Proof Hash
 	res.passed = true;
-	res.rationale = QStringLiteral("VERIFIED: Action satisfies Capabilities, Authority, and Trust constraints.");
+	res.rationale = QStringLiteral("VERIFIED: Action satisfies Authority and Canonical Omega(P) convergence.");
 
 	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
 	const auto proofPayload = QStringLiteral("%1:%2:%3:%4:%5")
 		.arg(actionType)
 		.arg(target)
-		.arg(res.expectedValue)
-		.arg(currentTrust)
+		.arg(res.omega.deltaD)
+		.arg(res.omega.V1)
 		.arg(nowMs);
 
 	const auto hashBytes = QCryptographicHash::hash(

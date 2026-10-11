@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_session_controller.h"
+#include "apo/apo_runtime.h"
 
 #include "apiwrap.h"
 #include "api/api_cloud_password.h"
@@ -3154,6 +3155,15 @@ void SessionController::showPeerHistory(
 		PeerId peerId,
 		const SectionShow &params,
 		MsgId msgId) {
+	// APΩ Choke Point: User UI Peer History Navigation Hook
+	apo::HookUiEvent(
+		QStringLiteral("SessionController"),
+		QStringLiteral("showPeerHistory"),
+		QJsonObject{
+			{ QStringLiteral("peer_id"), static_cast<qint64>(peerId.value) },
+			{ QStringLiteral("msg_id"), static_cast<qint64>(msgId.bare) }
+		});
+
 	if (const auto peer = session().data().peerLoaded(peerId)) {
 		if (const auto channel = peer->asChannel()) {
 			if (channel->isCommunity()) {
