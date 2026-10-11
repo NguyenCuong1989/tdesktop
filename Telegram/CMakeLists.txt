@@ -120,6 +120,18 @@ nice_target_sources(Telegram ${src_loc}
 PRIVATE
     ${style_files}
 
+    apo/apo_common.h
+    apo/apo_authority.h
+    apo/apo_authority.cpp
+    apo/apo_behavior_ledger.h
+    apo/apo_behavior_ledger.cpp
+    apo/apo_state_bridge.h
+    apo/apo_state_bridge.cpp
+    apo/apo_runtime.h
+    apo/apo_runtime.cpp
+    apo/apo_executor.h
+    apo/apo_executor.cpp
+
     api/api_attached_stickers.cpp
     api/api_attached_stickers.h
     api/api_authorizations.cpp
