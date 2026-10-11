@@ -31,26 +31,29 @@ void ActionExecutor::submitAction(
 	action.target = target;
 	action.parameters = parameters;
 	action.rationale = rationale;
+	action.phase = ActionPhase::Planned;
 	action.proposedTimeMs = nowMs;
 	action.callback = onComplete;
 
-	// Decision logging
-	QJsonObject decisionPayload;
-	decisionPayload[QStringLiteral("action_id")] = actionId;
-	decisionPayload[QStringLiteral("action_type")] = actionType;
-	decisionPayload[QStringLiteral("target")] = target;
-	decisionPayload[QStringLiteral("parameters")] = parameters;
-	decisionPayload[QStringLiteral("rationale")] = rationale;
+	// Phase 1: PLANNED - Log decision in Behavior Ledger
+	QJsonObject plannedPayload;
+	plannedPayload[QStringLiteral("action_id")] = actionId;
+	plannedPayload[QStringLiteral("action_type")] = actionType;
+	plannedPayload[QStringLiteral("target")] = target;
+	plannedPayload[QStringLiteral("parameters")] = parameters;
+	plannedPayload[QStringLiteral("rationale")] = rationale;
+	plannedPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Planned);
 
 	RecordBehavior(
 		EventType::Decision,
 		actionId,
 		QStringLiteral("apo.agent_core"),
-		decisionPayload);
+		plannedPayload);
 
 	// Authority check: Capability != Authority
 	const auto authority = AuthorityManager::Instance().getActionAuthority(actionType);
 
+	// Phase 2: VERIFIED
 	QJsonObject verifyPayload;
 	verifyPayload[QStringLiteral("action_id")] = actionId;
 	verifyPayload[QStringLiteral("action_type")] = actionType;
@@ -58,16 +61,21 @@ void ActionExecutor::submitAction(
 
 	if (authority == AuthorityLevel::AutoExecuteAllowed) {
 		verifyPayload[QStringLiteral("result")] = QStringLiteral("ALLOWED_AUTO");
+		verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Verified);
 		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
+
+		action.phase = ActionPhase::Verified;
 		executeInternal(action);
 	} else if (authority == AuthorityLevel::RequireApproval) {
 		verifyPayload[QStringLiteral("result")] = QStringLiteral("HELD_FOR_USER_APPROVAL");
+		verifyPayload[QStringLiteral("phase")] = QStringLiteral("PENDING_USER_APPROVAL");
 		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
 
 		QMutexLocker locker(&_mutex);
 		_pendingActions[actionId] = action;
 	} else {
 		verifyPayload[QStringLiteral("result")] = QStringLiteral("DENIED_BY_POLICY");
+		verifyPayload[QStringLiteral("phase")] = QStringLiteral("REJECTED");
 		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
 		if (onComplete) {
 			onComplete(false);
@@ -90,8 +98,10 @@ void ActionExecutor::approveAction(const QString &actionId) {
 	QJsonObject verifyPayload;
 	verifyPayload[QStringLiteral("action_id")] = actionId;
 	verifyPayload[QStringLiteral("result")] = QStringLiteral("USER_EXPLICIT_APPROVAL");
+	verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Verified);
 	RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("ui.approval_dialog"), verifyPayload);
 
+	action.phase = ActionPhase::Verified;
 	executeInternal(action);
 }
 
@@ -111,6 +121,7 @@ void ActionExecutor::rejectAction(const QString &actionId, const QString &reason
 	verifyPayload[QStringLiteral("action_id")] = actionId;
 	verifyPayload[QStringLiteral("result")] = QStringLiteral("USER_EXPLICIT_REJECTION");
 	verifyPayload[QStringLiteral("reason")] = reason;
+	verifyPayload[QStringLiteral("phase")] = QStringLiteral("CLOSED_REJECTED");
 	RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("ui.approval_dialog"), verifyPayload);
 
 	if (action.callback) {
@@ -118,7 +129,29 @@ void ActionExecutor::rejectAction(const QString &actionId, const QString &reason
 	}
 }
 
+void ActionExecutor::advancePhase(const QString &actionId, ActionPhase newPhase) {
+	QJsonObject payload;
+	payload[QStringLiteral("action_id")] = actionId;
+	payload[QStringLiteral("new_phase")] = ActionPhaseToString(newPhase);
+
+	EventType evtType = EventType::Execution;
+	if (newPhase == ActionPhase::Acknowledged || newPhase == ActionPhase::Observed) {
+		evtType = EventType::ObservedResult;
+	} else if (newPhase == ActionPhase::Closed) {
+		evtType = EventType::StateReduce;
+	}
+
+	RecordBehavior(
+		evtType,
+		actionId,
+		QStringLiteral("apo.executor.lifecycle"),
+		payload);
+}
+
 void ActionExecutor::executeInternal(const PendingAction &action) {
+	// Phase 3: SENT
+	advancePhase(action.actionId, ActionPhase::Sent);
+
 	QJsonObject execPayload;
 	execPayload[QStringLiteral("action_id")] = action.actionId;
 	execPayload[QStringLiteral("action_type")] = action.actionType;
@@ -130,6 +163,15 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 		action.actionId,
 		QStringLiteral("apo.executor"),
 		execPayload);
+
+	// Phase 4: ACKNOWLEDGED
+	advancePhase(action.actionId, ActionPhase::Acknowledged);
+
+	// Phase 5: OBSERVED
+	advancePhase(action.actionId, ActionPhase::Observed);
+
+	// Phase 6: CLOSED
+	advancePhase(action.actionId, ActionPhase::Closed);
 
 	// Execution complete callback
 	if (action.callback) {

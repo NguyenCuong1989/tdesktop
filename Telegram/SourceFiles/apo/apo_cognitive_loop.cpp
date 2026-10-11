@@ -101,8 +101,19 @@ void CognitiveLoop::step() {
 		const auto candidateAction = QStringLiteral("compute.draft_reply");
 		const auto targetChat = QStringLiteral("unread_inbox");
 
-		// 5. DECIDE & 6. VERIFY: Evaluate through canonical APO verifier
-		const ApoStateQuad candidateState{ 0.0, 0.05, 1.0, 0.99 };
+		// 5. DECIDE & 6. VERIFY: Evaluate dynamic candidate state through canonical APO verifier
+		const double dynamicCost = std::clamp(unreadCount * 0.005, 0.0, 0.05);
+		const double dynamicRisk = std::clamp(0.04 + (unreadCount > 10 ? 0.02 : 0.0), 0.01, 0.08);
+		const double dynamicEfficiency = std::clamp(0.95 + (ecoState.E * 0.05), 0.9, 1.0);
+		const double dynamicBoundary = std::clamp(0.95 + (ecoState.T * 0.045), 0.95, 0.995);
+
+		const ApoStateQuad candidateState{
+			dynamicCost,
+			dynamicRisk,
+			dynamicEfficiency,
+			dynamicBoundary
+		};
+
 		const auto verification = ApoVerifier::Instance().verifyAction(
 			candidateAction,
 			targetChat,

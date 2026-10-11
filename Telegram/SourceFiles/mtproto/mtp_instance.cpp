@@ -1168,6 +1168,16 @@ void Instance::Private::processCallback(const Response &response) {
 	}
 	if (handler.done || handler.fail) {
 		const auto handleError = [&](const Error &error) {
+			// APΩ Choke Point: Inbound MTProto RPC Error Response Hook
+			apo::HookMtprotoResponse(
+				requestId,
+				QStringLiteral("RPC_ERROR"),
+				false,
+				QJsonObject{
+					{ QStringLiteral("code"), static_cast<qint64>(error.code()) },
+					{ QStringLiteral("type"), error.type() }
+				});
+
 			DEBUG_LOG(("RPC Info: "
 				"error received, code %1, type %2, description: %3").arg(
 					QString::number(error.code()),
@@ -1196,6 +1206,12 @@ void Instance::Private::processCallback(const Response &response) {
 						"RESPONSE_PARSE_FAILED",
 						"Error parse failed.")));
 		} else {
+			// APΩ Choke Point: Inbound MTProto RPC Success Response Hook
+			apo::HookMtprotoResponse(
+				requestId,
+				QStringLiteral("RPC_SUCCESS"),
+				true);
+
 			const auto guard = QPointer<Instance>(_instance);
 			if (handler.done && !handler.done(response) && guard) {
 				handleError(Error::Local(
