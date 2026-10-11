@@ -61,6 +61,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "apo/apo_runtime.h"
+#include "apo/apo_state_bridge.h"
+#include "apo/apo_behavior_ledger.h"
 #include "media/view/media_view_overlay_widget.h"
 #include "media/view/media_view_open_common.h"
 #include "mtproto/mtproto_dc_options.h"
@@ -188,6 +191,9 @@ Application::Application()
 
 	_platformIntegration->init();
 
+	// APΩ Native Agent Runtime: Bootstrapping autonomous core
+	apo::Runtime::Instance().start();
+
 	passcodeLockChanges(
 	) | rpl::on_next([=](bool locked) {
 		_shouldLockAt = 0;
@@ -209,8 +215,18 @@ Application::Application()
 
 	_domain->activeSessionChanges(
 	) | rpl::on_next([=](Main::Session *session) {
-		if (session && !UpdaterDisabled()) { // #TODO multi someSessionValue
-			UpdateChecker().setMtproto(session);
+		if (session) {
+			if (!UpdaterDisabled()) { // #TODO multi someSessionValue
+				UpdateChecker().setMtproto(session);
+			}
+			// Hook session user identity and status into APΩ State Bridge
+			apo::StateBridge::Instance().updateUserProfile(
+				session->userId().bare,
+				QString(),
+				QString(),
+				QString(),
+				QString(),
+				session->premium());
 		}
 	}, _lifetime);
 
@@ -258,6 +274,9 @@ void Application::closeAdditionalWindows() {
 }
 
 Application::~Application() {
+	// APΩ Native Agent Runtime: Flushing and stopping autonomous loop
+	apo::Runtime::Instance().stop();
+
 	if (_savedWindows) {
 		_savedWindows->writeNow();
 	}

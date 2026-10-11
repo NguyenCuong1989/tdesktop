@@ -19,6 +19,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/calls_instance.h"
 #include "main/main_account.h" // Account::configUpdated.
 #include "core/application.h"
+#include "apo/apo_runtime.h"
 #include "core/core_settings.h"
 #include "lang/lang_instance.h"
 #include "lang/lang_cloud_manager.h"
@@ -1167,6 +1168,16 @@ void Instance::Private::processCallback(const Response &response) {
 	}
 	if (handler.done || handler.fail) {
 		const auto handleError = [&](const Error &error) {
+			// APΩ Choke Point: Inbound MTProto RPC Error Response Hook
+			apo::HookMtprotoResponse(
+				requestId,
+				QStringLiteral("RPC_ERROR"),
+				false,
+				QJsonObject{
+					{ QStringLiteral("code"), static_cast<qint64>(error.code()) },
+					{ QStringLiteral("type"), error.type() }
+				});
+
 			DEBUG_LOG(("RPC Info: "
 				"error received, code %1, type %2, description: %3").arg(
 					QString::number(error.code()),
@@ -1195,6 +1206,12 @@ void Instance::Private::processCallback(const Response &response) {
 						"RESPONSE_PARSE_FAILED",
 						"Error parse failed.")));
 		} else {
+			// APΩ Choke Point: Inbound MTProto RPC Success Response Hook
+			apo::HookMtprotoResponse(
+				requestId,
+				QStringLiteral("RPC_SUCCESS"),
+				true);
+
 			const auto guard = QPointer<Instance>(_instance);
 			if (handler.done && !handler.done(response) && guard) {
 				handleError(Error::Local(
@@ -2198,6 +2215,15 @@ void Instance::sendRequest(
 		crl::time msCanWait,
 		bool needsLayer,
 		mtpRequestId afterRequestId) {
+	// APΩ Choke Point: Outbound MTProto Request Execution Hook
+	apo::HookMtprotoRequest(
+		requestId,
+		QStringLiteral("MTProtoRequest"),
+		QJsonObject{
+			{ QStringLiteral("shifted_dc_id"), static_cast<qint64>(shiftedDcId) },
+			{ QStringLiteral("ms_can_wait"), static_cast<qint64>(msCanWait) }
+		});
+
 	return _private->sendRequest(
 		requestId,
 		std::move(request),
