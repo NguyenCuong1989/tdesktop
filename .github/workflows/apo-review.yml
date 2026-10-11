@@ -1,0 +1,113 @@
+name: APΩ Agent Native Review & Verification
+
+on:
+  push:
+    branches:
+      - apo/master
+      - dev
+  pull_request:
+    branches:
+      - apo/master
+      - dev
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+
+jobs:
+  apo-review-gate:
+    name: APΩ Native Architecture & Static Verification Gate
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify APΩ Native Architecture Integrity
+        shell: pwsh
+        run: |
+          Write-Host "Running APΩ Native Static Gate Verification..." -ForegroundColor Cyan
+          $required = @(
+              "Telegram/SourceFiles/apo/apo_common.h",
+              "Telegram/SourceFiles/apo/apo_authority.h",
+              "Telegram/SourceFiles/apo/apo_authority.cpp",
+              "Telegram/SourceFiles/apo/apo_behavior_ledger.h",
+              "Telegram/SourceFiles/apo/apo_behavior_ledger.cpp",
+              "Telegram/SourceFiles/apo/apo_state_bridge.h",
+              "Telegram/SourceFiles/apo/apo_state_bridge.cpp",
+              "Telegram/SourceFiles/apo/apo_economy_state.h",
+              "Telegram/SourceFiles/apo/apo_economy_state.cpp",
+              "Telegram/SourceFiles/apo/apo_verifier.h",
+              "Telegram/SourceFiles/apo/apo_verifier.cpp",
+              "Telegram/SourceFiles/apo/apo_cognitive_loop.h",
+              "Telegram/SourceFiles/apo/apo_cognitive_loop.cpp",
+              "Telegram/SourceFiles/apo/apo_runtime.h",
+              "Telegram/SourceFiles/apo/apo_runtime.cpp",
+              "Telegram/SourceFiles/apo/apo_executor.h",
+              "Telegram/SourceFiles/apo/apo_executor.cpp"
+          )
+          foreach ($f in $required) {
+              if (Test-Path $f) {
+                  Write-Host "[PASS] Present: $f" -ForegroundColor Green
+              } else {
+                  Write-Error "[FAIL] Missing required APΩ file: $f"
+                  exit 1
+              }
+          }
+
+      - name: Verify Hook Points in Telegram Native Source
+        shell: pwsh
+        run: |
+          Write-Host "Auditing choke points wiring in upstream Telegram source..." -ForegroundColor Cyan
+          
+          # Check Core Application start/stop
+          $app = Get-Content Telegram/SourceFiles/core/application.cpp -Raw
+          if ($app -match "apo::Runtime::Instance\(\)\.start\(\)") {
+              Write-Host "[PASS] Application lifecycle start hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] Application start hook missing"
+              exit 1
+          }
+
+          # Check Inbound MTProto Updates
+          $updates = Get-Content Telegram/SourceFiles/api/api_updates.cpp -Raw
+          if ($updates -match "apo::HookServerUpdate") {
+              Write-Host "[PASS] MTProto Inbound Updates hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] MTProto Inbound Updates hook missing"
+              exit 1
+          }
+
+          # Check Outbound MTProto Requests & Responses
+          $mtp = Get-Content Telegram/SourceFiles/mtproto/mtp_instance.cpp -Raw
+          if (($mtp -match "apo::HookMtprotoRequest") -and ($mtp -match "apo::HookMtprotoResponse")) {
+              Write-Host "[PASS] MTProto Outbound Request and Response hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] MTProto Outbound/Response hook missing"
+              exit 1
+          }
+
+          # Check UI Navigation
+          $sessionCtrl = Get-Content Telegram/SourceFiles/window/window_session_controller.cpp -Raw
+          if ($sessionCtrl -match "apo::HookUiEvent") {
+              Write-Host "[PASS] UI Navigation hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] UI Navigation hook missing"
+              exit 1
+          }
+
+      - name: CMake Syntax & Source Registration Check
+        shell: pwsh
+        run: |
+          cmake --version
+          $cmakeLists = Get-Content Telegram/CMakeLists.txt -Raw
+          if ($cmakeLists -match "apo/apo_runtime.cpp" -and $cmakeLists -match "apo/apo_verifier.cpp") {
+              Write-Host "[PASS] All APΩ sources registered in CMakeLists.txt" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] APΩ sources missing from CMakeLists.txt"
+              exit 1
+          }
