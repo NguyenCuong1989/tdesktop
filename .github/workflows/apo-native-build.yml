@@ -1,0 +1,149 @@
+name: APΩ Native x64 Debug Build
+
+on:
+  push:
+    branches:
+      - apo/master
+  pull_request:
+    branches:
+      - apo/master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-x64-debug:
+    name: Ω-Telegram Windows x64 Debug
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      PREPARE_PATH: Telegram/build/prepare/prepare.py
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Prepare TBuild layout
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Resolve repository name
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
+
+      - name: Checkout Ω-Telegram source with submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: Resolve official SDK and cache key
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "$(sha256sum $TBUILD/$REPO_NAME/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+
+      - name: Native Tools Command Prompt
+        uses: Eden-CI/msvc-dev-cmd@master
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: 14.44
+
+      - name: Verify compiler toolchain
+        run: |
+          cl.exe
+          cmake --version
+          ninja --version
+
+      - name: NuGet sources
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Cache ThirdParty
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-${{ runner.arch }}-apo-third-party-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ runner.arch }}-apo-third-party-
+
+      - name: Cache Libraries
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-apo-libs-v2-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-x64-apo-libs-v2-
+
+      - name: Cache Qt
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-apo-qt-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-x64-apo-qt-
+
+      - name: Prepare official Telegram dependencies
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent
+
+      - name: Configure Ω-Telegram with Telegram test API
+        run: |
+          cd %TBUILD%\%REPO_NAME%\Telegram
+          call configure.bat ^
+          x64 ^
+          -D TDESKTOP_API_TEST=ON ^
+          -D CMAKE_CONFIGURATION_TYPES=Debug ^
+          -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
+          -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+
+      - name: Build native Telegram Debug binary
+        run: |
+          cd %TBUILD%\%REPO_NAME%\Telegram
+          cmake --build ..\out --config Debug --parallel
+
+      - name: Verify APΩ native objects are linked into build graph
+        shell: pwsh
+        run: |
+          $repo = "$env:TBUILD\$env:REPO_NAME"
+          $exe = Join-Path $repo "out\Debug\Telegram.exe"
+          $updater = Join-Path $repo "out\Debug\Updater.exe"
+          if (!(Test-Path $exe)) { throw "Telegram.exe missing after native build" }
+          if (!(Test-Path $updater)) { throw "Updater.exe missing after native build" }
+          Get-FileHash $exe -Algorithm SHA256
+          Get-Item $exe | Format-List FullName,Length,LastWriteTime
+
+      - name: Package native artifact
+        run: |
+          set OUT=%TBUILD%\%REPO_NAME%\out\Debug
+          mkdir artifact
+          copy %OUT%\Telegram.exe artifact\Telegram.exe
+          copy %OUT%\Updater.exe artifact\Updater.exe
+
+      - name: Upload Ω-Telegram Debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: omega-telegram-windows-x64-debug-${{ github.sha }}
+          path: artifact\
+          retention-days: 7
