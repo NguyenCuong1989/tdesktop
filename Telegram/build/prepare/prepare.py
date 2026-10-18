@@ -1044,7 +1044,13 @@ stage('libjxl', """
     -DJPEGXL_WARNINGS_AS_ERRORS=OFF
 """) + """
 win:
+    # Native MSVC uses Windows threads, not POSIX pthread libraries.
+    # CMake 4.4 try_compile may error while probing nonexistent pthread libs.
+    # Seed those three negative cache results; FindThreads then selects Win32.
     cmake . ^
+        -DCMAKE_HAVE_LIBC_PTHREAD:INTERNAL=0 ^
+        -DCMAKE_HAVE_PTHREADS_CREATE:INTERNAL=0 ^
+        -DCMAKE_HAVE_PTHREAD_CREATE:INTERNAL=0 ^
         -DCMAKE_INSTALL_PREFIX=%LIBS_DIR%/local ^
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
         -DCMAKE_C_FLAGS="/DJXL_STATIC_DEFINE /DJXL_THREADS_STATIC_DEFINE /DJXL_CMS_STATIC_DEFINE" ^
