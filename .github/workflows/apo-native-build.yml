@@ -25,12 +25,24 @@ jobs:
         shell: cmd
 
     steps:
-      - name: Prepare TBuild layout
+      - name: Prepare TBuild layout on workspace drive
         run: |
-          mkdir %userprofile%\TBuild\Libraries
-          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          rem Keep all dependencies, sources and object files on the large
+          rem workspace drive instead of redirecting to USERPROFILE (C:).
+          if not exist "%GITHUB_WORKSPACE%\TBuild\Libraries" mkdir "%GITHUB_WORKSPACE%\TBuild\Libraries"
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Verify workspace disk capacity
+        shell: pwsh
+        run: |
+          $workspace = (Get-Item -LiteralPath $env:GITHUB_WORKSPACE).FullName
+          $drive = [IO.Path]::GetPathRoot($workspace).Substring(0, 1)
+          $volume = Get-PSDrive -Name $drive -PSProvider FileSystem
+          Write-Host ("Workspace drive {0}: {1:N1} GiB available" -f $drive, ($volume.Free / 1GB))
+          if ($volume.Free -lt 40GB) {
+            throw 'Insufficient workspace drive capacity for native Telegram Debug compilation'
+          }
 
       - name: Resolve repository name
         shell: bash
