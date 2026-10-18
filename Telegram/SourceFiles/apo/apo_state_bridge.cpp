@@ -30,11 +30,16 @@ void StateBridge::updateUserProfile(
 	_self.isPremium = isPremium;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
 
+	// Account profile fields (especially phone) must not enter raw telemetry.
+	QJsonObject safeProfile;
+	safeProfile[QStringLiteral("profile_updated")] = true;
+	safeProfile[QStringLiteral("has_identity")] = (userId != 0);
+	safeProfile[QStringLiteral("is_premium")] = isPremium;
 	RecordBehavior(
 		EventType::StateReduce,
 		QString(),
 		QStringLiteral("apo.state_bridge"),
-		_self.toJson());
+		safeProfile);
 }
 
 void StateBridge::updateUnreadCount(int unreadTotal) {

@@ -19,13 +19,14 @@ public:
 	static BehaviorLedger &Instance();
 
 	void init(const QString &storagePath = QString());
-	void recordEvent(
+	bool recordEvent(
 		EventType type,
 		const QString &traceId,
 		const QString &actor,
 		const QJsonObject &payload,
 		const QString &parentTraceId = QString());
 
+	[[nodiscard]] bool isInitialized() const;
 	[[nodiscard]] QString lastHash() const;
 	[[nodiscard]] int64 totalEvents() const;
 
@@ -34,6 +35,9 @@ public:
 private:
 	BehaviorLedger();
 	~BehaviorLedger();
+
+	// Caller must already hold _mutex.
+	void initUnlocked(const QString &storagePath);
 
 	BehaviorLedger(const BehaviorLedger &) = delete;
 	BehaviorLedger &operator=(const BehaviorLedger &) = delete;
@@ -47,13 +51,13 @@ private:
 };
 
 // Global convenience recording function
-inline void RecordBehavior(
+inline bool RecordBehavior(
 	EventType type,
 	const QString &traceId,
 	const QString &actor,
 	const QJsonObject &payload,
 	const QString &parentTraceId = QString()) {
-	BehaviorLedger::Instance().recordEvent(type, traceId, actor, payload, parentTraceId);
+	return BehaviorLedger::Instance().recordEvent(type, traceId, actor, payload, parentTraceId);
 }
 
 } // namespace apo

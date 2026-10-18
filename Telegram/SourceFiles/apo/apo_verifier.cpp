@@ -92,13 +92,17 @@ VerificationResult ApoVerifier::verifyAction(
 	// Record APO_VERIFY event in the Raw Behavior Ledger
 	QJsonObject logPayload = res.toJson();
 	logPayload[QStringLiteral("action_type")] = actionType;
-	logPayload[QStringLiteral("target")] = target;
+	logPayload[QStringLiteral("target_present")] = !target.isEmpty();
 
-	RecordBehavior(
+	if (!RecordBehavior(
 		EventType::ApoVerify,
 		res.proofHash.left(16),
 		QStringLiteral("apo.verifier"),
-		logPayload);
+		logPayload)) {
+		res.passed = false;
+		res.proofHash.clear();
+		res.rationale = QStringLiteral("REJECTED: audit ledger persistence unavailable.");
+	}
 
 	return res;
 }

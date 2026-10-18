@@ -66,9 +66,6 @@ public:
 	// User denied a pending action via UI
 	void rejectAction(const QString &actionId, const QString &reason);
 
-	// Advance action through the 6-phase lifecycle
-	void advancePhase(const QString &actionId, ActionPhase newPhase);
-
 	[[nodiscard]] std::vector<PendingAction> listPendingActions() const;
 
 private:
@@ -79,6 +76,10 @@ private:
 	ActionExecutor &operator=(const ActionExecutor &) = delete;
 
 	void executeInternal(const PendingAction &action);
+
+	// Private until a native dispatch adapter can verify each transition against
+	// a matching Telegram request/response/update, not an intent label.
+	void advancePhase(const QString &actionId, ActionPhase newPhase);
 
 	mutable QMutex _mutex;
 	QMap<QString, PendingAction> _pendingActions;

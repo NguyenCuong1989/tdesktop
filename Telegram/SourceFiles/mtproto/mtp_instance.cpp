@@ -1206,17 +1206,18 @@ void Instance::Private::processCallback(const Response &response) {
 						"RESPONSE_PARSE_FAILED",
 						"Error parse failed.")));
 		} else {
-			// APΩ Choke Point: Inbound MTProto RPC Success Response Hook
-			apo::HookMtprotoResponse(
-				requestId,
-				QStringLiteral("RPC_SUCCESS"),
-				true);
-
+			// Success is reported only after the native response parser accepts the reply.
 			const auto guard = QPointer<Instance>(_instance);
-			if (handler.done && !handler.done(response) && guard) {
+			const auto parsed = !handler.done || handler.done(response);
+			if (!parsed && guard) {
 				handleError(Error::Local(
 					"RESPONSE_PARSE_FAILED",
 					"Response parse failed."));
+			} else if (parsed && guard) {
+				apo::HookMtprotoResponse(
+					requestId,
+					QStringLiteral("RPC_SUCCESS"),
+					true);
 			}
 			if (guard) {
 				unregisterRequest(requestId);

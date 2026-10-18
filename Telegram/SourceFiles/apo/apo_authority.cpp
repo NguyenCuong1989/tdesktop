@@ -56,6 +56,9 @@ void AuthorityManager::setActionAuthority(const QString &actionName, AuthorityLe
 
 AuthorityLevel AuthorityManager::getActionAuthority(const QString &actionName) const {
 	QMutexLocker locker(&_mutex);
+	if (_globalPolicy == AuthorityLevel::Deny) {
+		return AuthorityLevel::Deny;
+	}
 	const auto it = _actionPolicies.constFind(actionName);
 	if (it != _actionPolicies.constEnd()) {
 		return it.value();

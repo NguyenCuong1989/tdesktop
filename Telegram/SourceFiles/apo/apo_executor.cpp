@@ -40,15 +40,21 @@ void ActionExecutor::submitAction(
 	plannedPayload[QStringLiteral("action_id")] = actionId;
 	plannedPayload[QStringLiteral("action_type")] = actionType;
 	plannedPayload[QStringLiteral("target")] = target;
-	plannedPayload[QStringLiteral("parameters")] = parameters;
-	plannedPayload[QStringLiteral("rationale")] = rationale;
+	plannedPayload[QStringLiteral("parameter_count")] = parameters.size();
+	plannedPayload[QStringLiteral("parameters_redacted")] = true;
+	plannedPayload[QStringLiteral("has_rationale")] = !rationale.isEmpty();
 	plannedPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Planned);
 
-	RecordBehavior(
+	if (!RecordBehavior(
 		EventType::Decision,
 		actionId,
 		QStringLiteral("apo.agent_core"),
-		plannedPayload);
+		plannedPayload)) {
+		if (onComplete) {
+			onComplete(false);
+		}
+		return;
+	}
 
 	// Authority check: Capability != Authority
 	const auto authority = AuthorityManager::Instance().getActionAuthority(actionType);
@@ -97,6 +103,17 @@ void ActionExecutor::approveAction(const QString &actionId) {
 
 	QJsonObject verifyPayload;
 	verifyPayload[QStringLiteral("action_id")] = actionId;
+	// Authorization may have changed while this action awaited approval.
+	const auto currentAuthority = AuthorityManager::Instance().getActionAuthority(action.actionType);
+	if (currentAuthority != AuthorityLevel::RequireApproval
+		&& currentAuthority != AuthorityLevel::AutoExecuteAllowed) {
+		verifyPayload[QStringLiteral("result")] = QStringLiteral("APPROVAL_REVOKED_BY_POLICY");
+		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
+		if (action.callback) {
+			action.callback(false);
+		}
+		return;
+	}
 	verifyPayload[QStringLiteral("result")] = QStringLiteral("USER_EXPLICIT_APPROVAL");
 	verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Verified);
 	RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("ui.approval_dialog"), verifyPayload);
@@ -149,14 +166,17 @@ void ActionExecutor::advancePhase(const QString &actionId, ActionPhase newPhase)
 }
 
 void ActionExecutor::executeInternal(const PendingAction &action) {
-	// Phase 3: SENT
-	advancePhase(action.actionId, ActionPhase::Sent);
-
+	// A VERIFIED intent is not a SENT operation. Until an actual native
+	// Telegram dispatch adapter is connected, fail closed and never claim
+	// ACKNOWLEDGED / OBSERVED / CLOSED or invoke a success callback.
 	QJsonObject execPayload;
 	execPayload[QStringLiteral("action_id")] = action.actionId;
 	execPayload[QStringLiteral("action_type")] = action.actionType;
 	execPayload[QStringLiteral("target")] = action.target;
-	execPayload[QStringLiteral("parameters")] = action.parameters;
+	execPayload[QStringLiteral("parameter_count")] = action.parameters.size();
+	execPayload[QStringLiteral("parameters_redacted")] = true;
+	execPayload[QStringLiteral("result")] = QStringLiteral("BLOCKED_NO_NATIVE_DISPATCH");
+	execPayload[QStringLiteral("phase")] = ActionPhaseToString(action.phase);
 
 	RecordBehavior(
 		EventType::Execution,
@@ -164,18 +184,8 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 		QStringLiteral("apo.executor"),
 		execPayload);
 
-	// Phase 4: ACKNOWLEDGED
-	advancePhase(action.actionId, ActionPhase::Acknowledged);
-
-	// Phase 5: OBSERVED
-	advancePhase(action.actionId, ActionPhase::Observed);
-
-	// Phase 6: CLOSED
-	advancePhase(action.actionId, ActionPhase::Closed);
-
-	// Execution complete callback
 	if (action.callback) {
-		action.callback(true);
+		action.callback(false);
 	}
 }
 

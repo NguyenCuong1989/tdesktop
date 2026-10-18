@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apo/apo_authority.h"
 #include "apo/apo_state_bridge.h"
 #include "apo/apo_cognitive_loop.h"
+#include <QtCore/QDebug>
 
 namespace apo {
 
@@ -28,21 +29,28 @@ void Runtime::start() {
 	if (_running) {
 		return;
 	}
-	_running = true;
-
-	// Initialize the Ledger
+	// The native agent must not start without a healthy, writable ledger.
 	BehaviorLedger::Instance().init();
+	if (!BehaviorLedger::Instance().isInitialized()) {
+		qWarning("APO runtime startup blocked: ledger is unavailable or failed integrity verification");
+		return;
+	}
+	_running = true;
 
 	QJsonObject payload;
 	payload[QStringLiteral("status")] = QStringLiteral("APO_RUNTIME_STARTED");
 	payload[QStringLiteral("mode")] = QStringLiteral("AGENT_NATIVE_TDESKTOP");
 	payload[QStringLiteral("version")] = QStringLiteral("0.1.0-alpha");
 
-	RecordBehavior(
+	if (!RecordBehavior(
 		EventType::StateReduce,
 		QStringLiteral("bootstrap"),
 		QStringLiteral("apo.runtime"),
-		payload);
+		payload)) {
+		_running = false;
+		qWarning("APO runtime startup blocked: initial ledger event could not be persisted");
+		return;
+	}
 
 	// Start 5-second background heartbeat
 	_heartbeatTimer = std::make_unique<QTimer>(this);
@@ -87,6 +95,16 @@ void Runtime::onHeartbeatTick() {
 	if (!_running) {
 		return;
 	}
+	if (!BehaviorLedger::Instance().isInitialized()) {
+		// Keep the Telegram UI alive, but disable unverified agent actions.
+		_running = false;
+		CognitiveLoop::Instance().stop();
+		if (_heartbeatTimer) {
+			_heartbeatTimer->stop();
+		}
+		qWarning("APO agent stopped: ledger persistence lost");
+		return;
+	}
 
 	QJsonObject payload;
 	payload[QStringLiteral("tick_time")] = static_cast<qint64>(QDateTime::currentMSecsSinceEpoch());
@@ -103,7 +121,9 @@ void Runtime::onUiEvent(
 	const QString &widgetName,
 	const QString &actionName,
 	const QJsonObject &details) {
-	QJsonObject payload = details;
+	QJsonObject payload;
+	payload[QStringLiteral("detail_count")] = details.size();
+	payload[QStringLiteral("details_redacted")] = true;
 	payload[QStringLiteral("widget")] = widgetName;
 	payload[QStringLiteral("action")] = actionName;
 
@@ -121,7 +141,8 @@ void Runtime::onMtprotoRequest(
 	QJsonObject payload;
 	payload[QStringLiteral("req_id")] = static_cast<qint64>(reqId);
 	payload[QStringLiteral("method")] = method;
-	payload[QStringLiteral("params")] = params;
+	payload[QStringLiteral("parameter_count")] = params.size();
+	payload[QStringLiteral("parameters_redacted")] = true;
 
 	RecordBehavior(
 		EventType::Execution,
@@ -139,7 +160,8 @@ void Runtime::onMtprotoResponse(
 	payload[QStringLiteral("req_id")] = static_cast<qint64>(reqId);
 	payload[QStringLiteral("method")] = method;
 	payload[QStringLiteral("success")] = success;
-	payload[QStringLiteral("result")] = result;
+	payload[QStringLiteral("result_field_count")] = result.size();
+	payload[QStringLiteral("result_redacted")] = true;
 
 	RecordBehavior(
 		EventType::ObservedResult,
@@ -153,7 +175,8 @@ void Runtime::onServerUpdate(
 	const QJsonObject &updateData) {
 	QJsonObject payload;
 	payload[QStringLiteral("update_type")] = updateType;
-	payload[QStringLiteral("data")] = updateData;
+	payload[QStringLiteral("data_field_count")] = updateData.size();
+	payload[QStringLiteral("data_redacted")] = true;
 
 	RecordBehavior(
 		EventType::ExternalInput,
