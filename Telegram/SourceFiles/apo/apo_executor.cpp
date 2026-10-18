@@ -6,6 +6,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "apo/apo_executor.h"
 #include "apo/apo_authority.h"
+#include "apo/apo_verifier.h"
 #include "apo/apo_behavior_ledger.h"
 #include <QtCore/QUuid>
 
@@ -21,6 +22,7 @@ void ActionExecutor::submitAction(
 	const QString &target,
 	const QJsonObject &parameters,
 	const QString &rationale,
+	const ApoStateQuad &candidateState,
 	std::function<void(bool success)> onComplete) {
 	const auto actionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
 	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
@@ -39,7 +41,7 @@ void ActionExecutor::submitAction(
 	QJsonObject plannedPayload;
 	plannedPayload[QStringLiteral("action_id")] = actionId;
 	plannedPayload[QStringLiteral("action_type")] = actionType;
-	plannedPayload[QStringLiteral("target")] = target;
+	plannedPayload[QStringLiteral("target_present")] = !target.isEmpty();
 	plannedPayload[QStringLiteral("parameter_count")] = parameters.size();
 	plannedPayload[QStringLiteral("parameters_redacted")] = true;
 	plannedPayload[QStringLiteral("has_rationale")] = !rationale.isEmpty();
@@ -56,7 +58,26 @@ void ActionExecutor::submitAction(
 		return;
 	}
 
-	// Authority check: Capability != Authority
+	// Mandatory verifier at the execution boundary: callers cannot bypass
+	// Omega(P) simply by submitting an action directly to the executor.
+	const auto verification = ApoVerifier::Instance().verifyAction(
+		actionType,
+		target,
+		parameters,
+		candidateState);
+	if (!verification.passed) {
+		QJsonObject rejected;
+		rejected[QStringLiteral("action_id")] = actionId;
+		rejected[QStringLiteral("result")] = QStringLiteral("REJECTED_BY_APO_VERIFIER");
+		rejected[QStringLiteral("reason")] = verification.rationale;
+		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.executor.gate"), rejected);
+		if (onComplete) {
+			onComplete(false);
+		}
+		return;
+	}
+
+	// Re-check authority after verification; a policy may change at any time.
 	const auto authority = AuthorityManager::Instance().getActionAuthority(actionType);
 
 	// Phase 2: VERIFIED
@@ -64,18 +85,29 @@ void ActionExecutor::submitAction(
 	verifyPayload[QStringLiteral("action_id")] = actionId;
 	verifyPayload[QStringLiteral("action_type")] = actionType;
 	verifyPayload[QStringLiteral("authority_level")] = AuthorityLevelToString(authority);
+	verifyPayload[QStringLiteral("proof_hash")] = verification.proofHash;
 
 	if (authority == AuthorityLevel::AutoExecuteAllowed) {
 		verifyPayload[QStringLiteral("result")] = QStringLiteral("ALLOWED_AUTO");
 		verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Verified);
-		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
+		if (!RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload)) {
+			if (onComplete) {
+				onComplete(false);
+			}
+			return;
+		}
 
 		action.phase = ActionPhase::Verified;
 		executeInternal(action);
 	} else if (authority == AuthorityLevel::RequireApproval) {
 		verifyPayload[QStringLiteral("result")] = QStringLiteral("HELD_FOR_USER_APPROVAL");
 		verifyPayload[QStringLiteral("phase")] = QStringLiteral("PENDING_USER_APPROVAL");
-		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
+		if (!RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload)) {
+			if (onComplete) {
+				onComplete(false);
+			}
+			return;
+		}
 
 		QMutexLocker locker(&_mutex);
 		_pendingActions[actionId] = action;
@@ -116,7 +148,12 @@ void ActionExecutor::approveAction(const QString &actionId) {
 	}
 	verifyPayload[QStringLiteral("result")] = QStringLiteral("USER_EXPLICIT_APPROVAL");
 	verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Verified);
-	RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("ui.approval_dialog"), verifyPayload);
+	if (!RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("ui.approval_dialog"), verifyPayload)) {
+		if (action.callback) {
+			action.callback(false);
+		}
+		return;
+	}
 
 	action.phase = ActionPhase::Verified;
 	executeInternal(action);
@@ -172,7 +209,7 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 	QJsonObject execPayload;
 	execPayload[QStringLiteral("action_id")] = action.actionId;
 	execPayload[QStringLiteral("action_type")] = action.actionType;
-	execPayload[QStringLiteral("target")] = action.target;
+	execPayload[QStringLiteral("target_present")] = !action.target.isEmpty();
 	execPayload[QStringLiteral("parameter_count")] = action.parameters.size();
 	execPayload[QStringLiteral("parameters_redacted")] = true;
 	execPayload[QStringLiteral("result")] = QStringLiteral("BLOCKED_NO_NATIVE_DISPATCH");

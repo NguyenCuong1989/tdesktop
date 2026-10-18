@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "apo/apo_common.h"
+#include "apo/apo_verifier.h"
 #include <QtCore/QMap>
 #include <QtCore/QMutex>
 #include <QtCore/QString>
@@ -58,6 +59,7 @@ public:
 		const QString &target,
 		const QJsonObject &parameters,
 		const QString &rationale,
+		const ApoStateQuad &candidateState,
 		std::function<void(bool success)> onComplete);
 
 	// User approved a pending action via UI

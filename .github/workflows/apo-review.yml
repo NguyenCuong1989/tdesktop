@@ -139,6 +139,7 @@ jobs:
         run: |
           $ledger = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.cpp -Raw
           $executor = Get-Content Telegram/SourceFiles/apo/apo_executor.cpp -Raw
+          $loop = Get-Content Telegram/SourceFiles/apo/apo_cognitive_loop.cpp -Raw
           $runtime = Get-Content Telegram/SourceFiles/apo/apo_runtime.cpp -Raw
           $mtproto = Get-Content Telegram/SourceFiles/mtproto/mtp_instance.cpp -Raw
           $callback = ($mtproto -split 'void Instance::Private::processCallback\(', 2)[1] -split 'void Instance::Private::processUpdate\(', 2
@@ -152,6 +153,11 @@ jobs:
               $ledger -notmatch 'QJsonDocument::fromJson\(' -or
               $ledger -notmatch 'restoredSequence') {
               throw 'Ledger initialization/replay guard missing'
+          }
+          if ($executor -notmatch 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
+              $loop -match 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
+              $executor -notmatch 'if \(!RecordBehavior\(EventType::ApoVerify') {
+              throw 'Omega verification or durable approval gate is bypassable'
           }
           if ($body -match 'advancePhase\(action\.actionId, ActionPhase::Acknowledged\)' -or
               $body -match 'action\.callback\(true\)') {

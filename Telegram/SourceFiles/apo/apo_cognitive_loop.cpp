@@ -84,7 +84,7 @@ void CognitiveLoop::step() {
 
 	QJsonObject computePayload;
 	computePayload[QStringLiteral("cycle")] = static_cast<qint64>(_cycleCount);
-	computePayload[QStringLiteral("user_id")] = static_cast<qint64>(self.userId);
+	computePayload[QStringLiteral("has_user_identity")] = (self.userId != 0);
 	computePayload[QStringLiteral("unread")] = unreadCount;
 	computePayload[QStringLiteral("active_capital")] = activeCap;
 	computePayload[QStringLiteral("trust")] = ecoState.T;
@@ -114,15 +114,9 @@ void CognitiveLoop::step() {
 			dynamicBoundary
 		};
 
-		const auto verification = ApoVerifier::Instance().verifyAction(
-			candidateAction,
-			targetChat,
-			computePayload,
-			candidateState
-		);
-
-		if (verification.passed) {
-			// 7. ACT: Submit action to ActionExecutor (respects Auto vs Require Approval)
+		// The executor runs the Omega(P) verifier at the only action boundary.
+		// A caller cannot advance an action by omitting mathematical verification.
+		// 7. ACT: Submit action to ActionExecutor (respects Auto vs Require Approval)
 			QJsonObject actionParams;
 			actionParams[QStringLiteral("unread_count")] = unreadCount;
 			actionParams[QStringLiteral("priority")] = QStringLiteral("HIGH");
@@ -132,7 +126,8 @@ void CognitiveLoop::step() {
 				targetChat,
 				actionParams,
 				QStringLiteral("Autonomous proactive triage for incoming chats"),
-				[traceId](bool success) {
+				candidateState,
+				[](bool success) {
 					// 8. OBSERVE RESULT & 9. LEARN: Reinforce trust capital
 					if (success) {
 						EconomyEngine::Instance().applyTrustFeedback(
@@ -146,7 +141,6 @@ void CognitiveLoop::step() {
 					}
 				}
 			);
-		}
 	}
 }
 
