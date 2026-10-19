@@ -10,7 +10,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apo/apo_verifier.h"
 #include "apo/apo_executor.h"
 #include "apo/apo_behavior_ledger.h"
+#include "core/application.h"
+#include "main/main_account.h"
+#include "main/main_session.h"
+#include "data/data_session.h"
+#include "dialogs/dialogs_main_list.h"
 #include <QtCore/QDateTime>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <algorithm>
+#include <vector>
 
 namespace apo {
 
@@ -53,6 +62,8 @@ void CognitiveLoop::stop() {
 		return;
 	}
 	_running = false;
+	_lastRankingAccount = 0;
+	_lastRankingEvidence.clear();
 	if (_loopTimer) {
 		_loopTimer->stop();
 		_loopTimer.reset();
@@ -95,52 +106,95 @@ void CognitiveLoop::step() {
 		QStringLiteral("apo.cognitive.evaluator"),
 		computePayload);
 
-	// 4. DISCOVER: Look for candidate proactive opportunities
-	if (unreadCount > 0) {
-		// Found opportunity to draft smart summaries / prioritize unread dialogs
-		const auto candidateAction = QStringLiteral("compute.draft_reply");
-		const auto targetChat = QStringLiteral("unread_inbox");
-
-		// 5. DECIDE & 6. VERIFY: Evaluate dynamic candidate state through canonical APO verifier
-		const double dynamicCost = std::clamp(unreadCount * 0.005, 0.0, 0.05);
-		const double dynamicRisk = std::clamp(0.04 + (unreadCount > 10 ? 0.02 : 0.0), 0.01, 0.08);
-		const double dynamicEfficiency = std::clamp(0.95 + (ecoState.E * 0.05), 0.9, 1.0);
-		const double dynamicBoundary = std::clamp(0.95 + (ecoState.T * 0.045), 0.95, 0.995);
-
-		const ApoStateQuad candidateState{
-			dynamicCost,
-			dynamicRisk,
-			dynamicEfficiency,
-			dynamicBoundary
-		};
-
-		// The executor runs the Omega(P) verifier at the only action boundary.
-		// A caller cannot advance an action by omitting mathematical verification.
-		// 7. ACT: Submit action to ActionExecutor (respects Auto vs Require Approval)
-			QJsonObject actionParams;
-			actionParams[QStringLiteral("unread_count")] = unreadCount;
-			actionParams[QStringLiteral("priority")] = QStringLiteral("HIGH");
-
-			ActionExecutor::Instance().submitAction(
-				candidateAction,
-				targetChat,
-				actionParams,
-				QStringLiteral("Autonomous proactive triage for incoming chats"),
-				candidateState,
-				[](bool success) {
-					// 8. OBSERVE RESULT & 9. LEARN: Reinforce trust capital
-					if (success) {
-						EconomyEngine::Instance().applyTrustFeedback(
-							1.0,  // Value delivered
-							1.0,  // Provenance verified
-							0.5,  // Scale quality
-							0.0,  // No adversarial penalty
-							0.0,  // No abuse
-							0.0   // No shadow risk
-						);
-					}
-				}
-			);
+	// 4. OBSERVE native dialogue context rather than interpreting the
+	// whole-account unread badge as an addressable chat or a customer request.
+	// A nonzero badge alone cannot authorize "compute.draft_reply": there
+	// is no message context, recipient, actual draft or measurable cost.
+	if (self.userId == 0 || unreadCount <= 0) {
+		return;
+	}
+	const auto session = Core::App().activeAccount().maybeSession();
+	if (!session || session->userId().bare != self.userId) {
+		return;
+	}
+	const auto list = session->data().chatsList();
+	constexpr auto kMaxInspected = 512;
+	constexpr auto kTop = 5;
+	struct RankedUnread {
+		int listPosition = 0;
+		int unread = 0;
+		int unmuted = 0;
+		int mentions = 0;
+	};
+	std::vector<RankedUnread> ranked;
+	const auto &rows = list->indexed()->all();
+	const auto limit = std::min(int(rows.size()), kMaxInspected);
+	int knownRows = 0;
+	int historyRows = 0;
+	auto rowIterator = rows.cbegin();
+	for (auto i = 0; i != limit; ++i, ++rowIterator) {
+		const auto row = *rowIterator;
+		if (!row->history()) {
+			continue; // A folder is not an independent conversation.
+		}
+		++historyRows;
+		const auto state = row->entry()->chatListUnreadState();
+		if (!state.known) {
+			continue; // Unknown is not zero unread.
+		}
+		++knownRows;
+		const auto unread = std::max(state.messages, 0);
+		const auto unmuted = std::max(unread - state.messagesMuted, 0);
+		const auto mentions = std::max(state.mentions, 0);
+		if (unread > 0 || mentions > 0) {
+			ranked.push_back({ i, unread, unmuted, mentions });
+		}
+	}
+	// Lexicographic priority uses measured Telegram values, not invented
+	// business value: mentions, nonmuted unread, total unread, recency.
+	std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+		if (a.mentions != b.mentions) return a.mentions > b.mentions;
+		if (a.unmuted != b.unmuted) return a.unmuted > b.unmuted;
+		if (a.unread != b.unread) return a.unread > b.unread;
+		return a.listPosition < b.listPosition;
+	});
+	QJsonArray top;
+	for (auto i = 0, count = std::min(int(ranked.size()), kTop);
+			i != count; ++i) {
+		const auto &item = ranked[i];
+		QJsonObject one;
+		one[QStringLiteral("priority_rank")] = i + 1;
+		one[QStringLiteral("loaded_list_position")] = item.listPosition;
+		one[QStringLiteral("unread_messages")] = item.unread;
+		one[QStringLiteral("unmuted_messages")] = item.unmuted;
+		one[QStringLiteral("mentions")] = item.mentions;
+		top.append(one);
+	}
+	QJsonObject observation;
+	observation[QStringLiteral("kind")] = QStringLiteral("NATIVE_UNREAD_PRIORITY_OBSERVATION");
+	observation[QStringLiteral("source")] = QStringLiteral("Data::Session.chatsList");
+	observation[QStringLiteral("source_loaded")] = list->loaded();
+	observation[QStringLiteral("total_loaded_rows")] = int(rows.size());
+	observation[QStringLiteral("inspected_rows")] = limit;
+	observation[QStringLiteral("history_rows")] = historyRows;
+	observation[QStringLiteral("known_unread_rows")] = knownRows;
+	observation[QStringLiteral("unread_ranked_rows")] = int(ranked.size());
+	observation[QStringLiteral("full_loaded_list_covered")] =
+		list->loaded() && (limit == int(rows.size()));
+	observation[QStringLiteral("top")] = top;
+	observation[QStringLiteral("result")] = QStringLiteral("OBSERVED_ONLY");
+	observation[QStringLiteral("native_dispatch")] = false;
+	// No peer IDs, chat names or message text leave the native process.
+	const auto snapshot = QJsonDocument(observation).toJson(QJsonDocument::Compact);
+	if (_lastRankingAccount != self.userId
+		|| _lastRankingEvidence != snapshot) {
+		if (RecordBehavior(EventType::Computation,
+			traceId,
+			QStringLiteral("apo.cognitive.unread_ranking"),
+			observation)) {
+			_lastRankingAccount = self.userId;
+			_lastRankingEvidence = snapshot;
+		}
 	}
 }
 

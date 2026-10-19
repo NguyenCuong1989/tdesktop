@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apo/apo_common.h"
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
+#include <QtCore/QByteArray>
 #include <memory>
 
 namespace apo {
@@ -35,6 +36,8 @@ private:
 	bool _running = false;
 	std::unique_ptr<QTimer> _loopTimer;
 	int64 _cycleCount = 0;
+	int64 _lastRankingAccount = 0;
+	QByteArray _lastRankingEvidence;
 };
 
 } // namespace apo

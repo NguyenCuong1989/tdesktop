@@ -67,11 +67,22 @@ try {
         'SCENARIO_RESULT: PASS (failures: 0)',
         'TEST_COMPLETE',
         'TEST_RESULT: PASS: AP native runtime is running inside Telegram.exe',
+        'TEST_RESULT: PASS: AP native ledger uses this Telegram working directory',
         'TEST_RESULT: PASS: Omega Telegram native application name is independent',
         'TEST_RESULT: PASS: Omega Telegram identity is visible in native window title',
         'TEST_RESULT: PASS: native Telegram painted frame is nonblank',
         'TEST_RESULT: PASS: Telegram enters its real QR login step',
-        'TEST_RESULT: PASS: entering login UI never fabricates authorization'
+        'TEST_RESULT: PASS: entering login UI never fabricates authorization',
+        'TEST_RESULT: PASS: native Ω(P) accepts the sealed convergent fixture',
+        'TEST_RESULT: PASS: native Ω(P) rejects a mathematically out-of-domain state',
+        'TEST_RESULT: PASS: native Ω(P) rejects infinite state components',
+        'TEST_RESULT: PASS: native Ω(P) rejects NaN state components',
+        'TEST_RESULT: PASS: unchanged unread count does not append another ledger event',
+        'TEST_RESULT: PASS: changed unread count appends exactly one ledger event',
+        'TEST_RESULT: PASS: invalid negative unread count is ignored',
+        'TEST_RESULT: PASS: anonymous cognitive fixture has no authorized account',
+        'TEST_RESULT: PASS: anonymous step records one observation but no fabricated action',
+        'TEST_RESULT: PASS: unwired native dispatch must complete with failure not success'
     )
     foreach($marker in $required){
         if(!$content.Contains($marker)){throw ("Missing product observation: "+$marker)}

@@ -48,7 +48,8 @@ void StateBridge::updateUserProfile(
 
 void StateBridge::updateUnreadCount(int64 accountUserId, int unreadTotal) {
 	QMutexLocker locker(&_mutex);
-	if (!accountUserId || _self.userId != accountUserId) {
+	if (!accountUserId || _self.userId != accountUserId
+		|| unreadTotal < 0 || _self.unreadTotal == unreadTotal) {
 		return;
 	}
 	_self.unreadTotal = unreadTotal;

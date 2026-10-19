@@ -169,3 +169,24 @@ Upstream verified directly via Firecrawl at `telegramdesktop/tdesktop` (`README.
 - Python reference tests: 45/45 PASS. Source syntax tests and reference tests remain lower-level evidence than product-runtime tests.
 
 **Outstanding engineering conditions:** real APΩ native action dispatch, correlated MTProto ACK, observed post-action Telegram state, durable per-action recovery, and measured autonomous user value. Current default Ledger location follows `QStandardPaths::AppDataLocation` (application-name scope), not the explicit `-workdir` profile; multiple isolated profile instances may therefore share an APΩ ledger. Verify and resolve this boundary before accepting multi-profile or full crash-recovery claims. Keep sensitive Telegram credentials and raw chat data out of build logs, Git and artifacts.
+
+### Native APΩ StateBridge, Ω(P) and unread-priority product verification — 2026-10-19
+
+**Scope:** existing Telegram Desktop C++/Qt/MTProto client; no external agent or transport. Retain full Telegram capabilities and Creator authority.
+
+**Implemented in source (subject to ongoing feature expansion):**
+- `apo_runtime.cpp`: profile-local Ledger at `cWorkingDir()/apo/raw_behavior.jsonl`; old shared AppData Ledger remains untouched, not merged into possibly unrelated profile histories.
+- `apo_state_bridge.cpp`: persist unread reduction only on true change and reject negative counts; no repetitive identical unread events.
+- `apo_verifier.cpp/h`: the sealed Ω(P) formula/thresholds are unchanged; both baseline and candidate must be finite and within `[0,1]^4`. Native fixture tests accept `S1=(0,0.05,1,0.99)` and reject NaN/Infinity/out-of-domain.
+- `apo_cognitive_loop.cpp/h`: read the **existing native** `Data::Session.chatsList()->indexed()->all()`, not a fictitious recipient or the full-account badge as a target. Observe at most 512 loaded chat rows, distinguish unknown unread state, rank known chats by mentions → unmuted unread → total unread → list recency, emit up to five anonymized priorities. Retain loaded-row and coverage metadata. Suppress identical ranking observations. Do not submit the previous empty `compute.draft_reply` intent every 10 seconds.
+- `apo_behavior_audit.ps1`: inspect structural telemetry only, per profile, including ledger continuity, Telegram base MTProto request/response and native unread ranking. Telegram network RPC callbacks are **not** APΩ action ACK.
+
+**Native build and tested runtime evidence:**
+- Actual MSVC x64 Debug `Telegram.exe` linked successfully with exit 0 after one compile fix for upstream `Dialogs::List` (const iterable, no `operator[]`). A separate LNK1104 attempt was caused by a second Omega native profile keeping the target binary mapped; it was shut down using Telegram's official `-quit`, without deleting either `tdata` or stopping official Telegram UWP.
+- Product profile was restarted and native `apo.cognitive.unread_ranking` event observed: 247 total loaded chat rows, 247 inspected, 246 known unread states, 80 ranked unread chats, fully covered **loaded list only**. Top five *anonymized* unread message counts: 1397, 868, 454, 384, 369. This does not claim to have crawled all Telegram history or identified business opportunities.
+- Source-linked product binary after ranking build SHA-256: `6915C8CE914960FD22B0A8ADD94B4BA768553AC55F8F10C722846EC564E3E131`.
+- Native regression rerun with upstream Telegram `Test::Runner`: `SCENARIO_RESULT: PASS (failures: 0)`, `TEST_COMPLETE`. This includes application branding, ledger profile isolation, Ω(P) math/domain validation, deduplicated unread reduction, honest blocked native dispatch, and anonymous cognitive cycle with zero invented actions. Overlay test binary SHA-256 `E1A3C9967B2A691A34FF2871D17CABCB458F5354D94867DB92ED240DE2250D6A`. Upstream `test_scenario.cpp` was restored byte-for-byte and **normal branded binary relinked** successfully, SHA-256 `BF168ADE0DBA7170839160315B3F8C2F25B75E7F3C8FD49B504902EBECB63055`.
+- Structural ledger integrity has previously shown no parse errors, sequence discontinuities or broken previous-hash pointers. Old `compute.draft_reply` candidates were rejected at the sealed Ω(P) gate (the saturated total unread was never a specific reply target). Inspect new process events for zero invented submissions.
+- Reference tests/CI are a separate lower-level gate; no assertion of full Telegram functional regression or APΩ native side-effect E2E is made.
+
+**Still open:** a truly authorized bounded native operation with `action_id → native request_id → server response → postcondition`; persisted pending/recovery state and unknown-outcome reconciliation; side-effect deduplication; Creator goal/authority UI; full Telegram upstream regression. Do not label a native read or network request as success solely because of a completion callback. Core Ω(P) formulas and Economy's six sealed equations must not be altered to get PASS.

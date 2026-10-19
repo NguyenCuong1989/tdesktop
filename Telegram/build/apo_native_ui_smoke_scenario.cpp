@@ -9,11 +9,19 @@ Do not use real Telegram sessions or require live network access.
 #include "test/test_capture.h"
 #include "apo/apo_runtime.h"
 #include "apo/apo_state_bridge.h"
+#include "apo/apo_behavior_ledger.h"
+#include "apo/apo_verifier.h"
+#include "apo/apo_executor.h"
+#include "apo/apo_cognitive_loop.h"
+#include <limits>
 #include "test/test_widgets.h"
 #include "intro/intro_widget.h"
 #include "intro/intro_qr.h"
 #include "ui/widgets/buttons.h"
 #include "lang/lang_keys.h"
+#include "settings.h"
+#include <QtCore/QFile>
+#include <QtCore/QDir>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
 
@@ -50,6 +58,9 @@ void SetupScenario(not_null<Runner*> runner) {
             }
             Check(apo::Runtime::Instance().isRunning(),
                 u"AP native runtime is running inside Telegram.exe"_q);
+            Check(QFile::exists(QDir(cWorkingDir()).filePath(
+                    u"apo/raw_behavior.jsonl"_q)),
+                u"AP native ledger uses this Telegram working directory"_q);
             Check(QCoreApplication::applicationName() == u"OmegaTelegramDesktop"_q,
                 u"Omega Telegram native application name is independent"_q);
             if (window) {
@@ -129,6 +140,84 @@ void SetupScenario(not_null<Runner*> runner) {
                 u"entering login UI never fabricates authorization"_q);
         },
         .timeout = kStartupStageTimeout,
+    });
+
+    runner->add({
+        .name = u"native APΩ mathematical verification"_q,
+        .then = [] {
+            const apo::ApoStateQuad baseline{ 0.0, 0.07, 1.0, 0.985 };
+            const apo::ApoStateQuad valid{ 0.0, 0.05, 1.0, 0.99 };
+            const auto eval = apo::ApoVerifier::Instance().evaluateOmega(
+                baseline, valid);
+            Check(eval.converged && std::abs(eval.deltaD + 0.00375) < 1e-9,
+                u"native Ω(P) accepts the sealed convergent fixture"_q);
+            const apo::ApoStateQuad negative{ -0.001, 0.07, 1.0, 0.985 };
+            Check(!apo::ApoVerifier::Instance().evaluateOmega(
+                    baseline, negative).converged,
+                u"native Ω(P) rejects a mathematically out-of-domain state"_q);
+            const apo::ApoStateQuad infinity{
+                std::numeric_limits<double>::infinity(), 0.07, 1.0, 0.985 };
+            Check(!apo::ApoVerifier::Instance().evaluateOmega(
+                    baseline, infinity).converged,
+                u"native Ω(P) rejects infinite state components"_q);
+            const apo::ApoStateQuad nan{
+                std::numeric_limits<double>::quiet_NaN(), 0.07, 1.0, 0.985 };
+            Check(!apo::ApoVerifier::Instance().evaluateOmega(
+                    baseline, nan).converged,
+                u"native Ω(P) rejects NaN state components"_q);
+        },
+    });
+    runner->add({
+        .name = u"APΩ state reduction only logs actual changes"_q,
+        .then = [] {
+            auto &state = apo::StateBridge::Instance();
+            state.updateUserProfile(917045, QString(), QString(),
+                QString(), QString(), false);
+            state.updateUnreadCount(917045, 7);
+            const auto beforeRepeat = apo::BehaviorLedger::Instance().totalEvents();
+            state.updateUnreadCount(917045, 7);
+            Check(apo::BehaviorLedger::Instance().totalEvents() == beforeRepeat,
+                u"unchanged unread count does not append another ledger event"_q);
+            state.updateUnreadCount(917045, 8);
+            Check(apo::BehaviorLedger::Instance().totalEvents() == beforeRepeat + 1,
+                u"changed unread count appends exactly one ledger event"_q);
+            state.updateUnreadCount(917045, -1);
+            Check(apo::BehaviorLedger::Instance().totalEvents() == beforeRepeat + 1,
+                u"invalid negative unread count is ignored"_q);
+            state.updateUserProfile(0, QString(), QString(),
+                QString(), QString(), false);
+        },
+    });
+    runner->add({
+        .name = u"anonymous native cognitive step cannot plan a reply"_q,
+        .then = [] {
+            const auto self = apo::StateBridge::Instance().currentSelf();
+            Check(self.userId == 0,
+                u"anonymous cognitive fixture has no authorized account"_q);
+            const auto before = apo::BehaviorLedger::Instance().totalEvents();
+            apo::CognitiveLoop::Instance().step();
+            Check(apo::BehaviorLedger::Instance().totalEvents() == before + 1,
+                u"anonymous step records one observation but no fabricated action"_q);
+        },
+    });
+    runner->add({
+        .name = u"native APΩ action must not fabricate server success"_q,
+        .then = [] {
+            auto receipt = std::make_shared<std::pair<bool, bool>>(false, true);
+            const apo::ApoStateQuad valid{ 0.0, 0.05, 1.0, 0.99 };
+            apo::ActionExecutor::Instance().submitAction(
+                u"compute.draft_reply"_q,
+                u"test_fixture_unread_only"_q,
+                QJsonObject{{QStringLiteral("unread_count"), 1}},
+                u"native fixture: verify truthful execution boundary"_q,
+                valid,
+                [receipt](bool success) {
+                    receipt->first = true;
+                    receipt->second = success;
+                });
+            Check(receipt->first && !receipt->second,
+                u"unwired native dispatch must complete with failure not success"_q);
+        },
     });
 }
 } // namespace Test

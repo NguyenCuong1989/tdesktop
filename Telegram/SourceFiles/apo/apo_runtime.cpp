@@ -9,6 +9,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apo/apo_authority.h"
 #include "apo/apo_state_bridge.h"
 #include "apo/apo_cognitive_loop.h"
+#include "settings.h"
+#include <QtCore/QDir>
 #include <QtCore/QDebug>
 
 namespace apo {
@@ -29,8 +31,21 @@ void Runtime::start() {
 	if (_running) {
 		return;
 	}
-	// The native agent must not start without a healthy, writable ledger.
-	BehaviorLedger::Instance().init();
+	// Match Telegram Desktop's own -workdir boundary. All APΩ events of
+	// one local client profile must be isolated from any other profile.
+	// Do not import the old app-name-global ledger: it may contain
+	// mixed test accounts or concurrent local sessions.
+	if (cWorkingDir().isEmpty()) {
+		qWarning("APO runtime startup blocked: Telegram working directory not initialized");
+		return;
+	}
+	const auto profileLedgerDir = QDir(cWorkingDir()).filePath(u"apo"_q);
+	if (!QDir().mkpath(profileLedgerDir)) {
+		qWarning("APO runtime startup blocked: profile ledger directory is unavailable");
+		return;
+	}
+	BehaviorLedger::Instance().init(
+		QDir(profileLedgerDir).filePath(u"raw_behavior.jsonl"_q));
 	if (!BehaviorLedger::Instance().isInitialized()) {
 		qWarning("APO runtime startup blocked: ledger is unavailable or failed integrity verification");
 		return;

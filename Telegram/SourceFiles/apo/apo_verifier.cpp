@@ -37,7 +37,8 @@ OmegaEvaluation ApoVerifier::evaluateOmega(
 	eval.deltaD = eval.D1 - eval.D0;
 	eval.deltaV = eval.V1 - eval.V0;
 
-	eval.converged = (std::abs(eval.deltaD) < kMaxDeltaDConvergence)
+	eval.converged = s0.withinDomain() && s1.withinDomain()
+		&& (std::abs(eval.deltaD) < kMaxDeltaDConvergence)
 		&& (eval.V1 >= kMinimumTruthThresholdV);
 
 	return eval;
@@ -55,6 +56,14 @@ VerificationResult ApoVerifier::verifyAction(
 	if (authLevel == AuthorityLevel::Deny) {
 		res.passed = false;
 		res.rationale = QStringLiteral("DENIED: Action explicitly forbidden by policy.");
+		return res;
+	}
+
+	// An S component outside [0,1], NaN or infinite cannot be evidence
+	// for an action, even if its arithmetic accidentally fits the threshold.
+	if (!candidateState.withinDomain()) {
+		res.passed = false;
+		res.rationale = QStringLiteral("REJECTED: INVALID_APO_STATE_DOMAIN");
 		return res;
 	}
 

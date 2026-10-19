@@ -20,6 +20,13 @@ struct ApoStateQuad {
 	double E = 1.0; // Efficiency / Energy (0.0 to 1.0)
 	double B = 1.0; // Boundary / Baseline (0.0 to 1.0)
 
+	[[nodiscard]] bool withinDomain() const {
+		const auto valid = [](double value) {
+			return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+		};
+		return valid(C) && valid(R) && valid(E) && valid(B);
+	}
+
 	[[nodiscard]] double computeD() const {
 		return (C + R + E + B) / 4.0;
 	}
