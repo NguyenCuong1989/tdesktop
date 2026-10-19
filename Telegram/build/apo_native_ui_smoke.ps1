@@ -67,6 +67,8 @@ try {
         'SCENARIO_RESULT: PASS (failures: 0)',
         'TEST_COMPLETE',
         'TEST_RESULT: PASS: AP native runtime is running inside Telegram.exe',
+        'TEST_RESULT: PASS: Omega Telegram native application name is independent',
+        'TEST_RESULT: PASS: Omega Telegram identity is visible in native window title',
         'TEST_RESULT: PASS: native Telegram painted frame is nonblank',
         'TEST_RESULT: PASS: Telegram enters its real QR login step',
         'TEST_RESULT: PASS: entering login UI never fabricates authorization'

@@ -1,4 +1,4 @@
-﻿# Ω-Telegram Next Session Checklist
+# Ω-Telegram Next Session Checklist
 
 Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram itself (an Active Telegram), not Telegram plus an external agent.
 
@@ -149,3 +149,23 @@ Upstream verified directly via Firecrawl at `telegramdesktop/tdesktop` (`README.
 - **Certified only:** source-in-build, native binary link, startup, initial UI rasterization and one real product navigation action without login. **Not yet certified:** authorized real Telegram session, account chat history/send/receive, APΩ dispatch with action-id↔request-id, MTProto server ACK, observed update, full action crash recovery, native Telegram Economy value.
 
 **Continue at the first unverified product dependency:** test real Telegram authorization and session projection in a separate authorized fixture, then connect the APΩ executor to the existing native Telegram sending APIs without inventing transport or marking SENT/ACK/OBSERVED optimistically. Preserve the user's existing sessions and do not label the untested E2E chain PASS.
+
+### Ω-Telegram branding and authenticated-profile restart — 2026-10-19
+
+**Product invariant unchanged:** Telegram Desktop itself is the client and APΩ is embedded native code. Branding does not introduce another transport, bot, application wrapper or LLM dependency.
+
+**Source changes:**
+- Core app name is `Omega Telegram Desktop`; runtime Qt application identity is `OmegaTelegramDesktop`. Main native window titles visibly include `Ω-Telegram` even when a chat is active. The About dialog discloses that this is a Telegram Desktop fork.
+- Windows executable version resources identify the independent Omega fork. Windows resource icon is `Telegram/Resources/art/omega_icon256.ico`, generated reproducibly by `Telegram/build/apo_brand_icon.ps1` from the untouched upstream paper-plane icon plus a purple Ω badge. The Qt runtime icon includes the corresponding badge.
+- Installer metadata in `Telegram/build/setup.iss` uses a different name, shortcut identity and GUID, matching `core/version.h`. **The installer has not been packaged or installed/tested yet.** The real Debug binary remains `out/Debug/Telegram.exe` to preserve upstream assumptions about the executable filename.
+- Windows desktop shortcut `C:\Users\pc\Desktop\Ω-Telegram.lnk` targets the native binary with `-workdir` directed to `out/omega-native-authorized`. The official Telegram UWP installation/shortcut is unaffected.
+
+**Native product results:**
+- MSVC x64 Debug build finished exit 0; executable resources read back as `Omega Telegram Desktop - Native AP Omega Fork`, independent publisher and product name.
+- Reusable native `apo_native_ui_smoke.ps1` was rerun with two additional assertions for application name and native window title. The actual `Telegram.exe` Debug harness recorded `SCENARIO_RESULT: PASS (failures: 0)` and `TEST_COMPLETE`, including the new branding checks and native Start Messaging → QR login flow. Its cleanup restored the upstream no-op test entrypoint byte-for-byte and relinked the normal product, both builds exit 0.
+- Normal restored branded Debug executable SHA-256: `F62EAA6732273A9A54E99D8299945E18F1A85B35F767BBF10985FCF30BA6E4A3`.
+- Creator authenticated the separate profile. The branded binary was restarted using the same profile and displayed the post-login Telegram interface with a title ending `• Ω-Telegram`. The original Telegram UWP process remained running. Authentication success beyond this observed native session is not a substitute for actual request/ACK tests.
+- Native APΩ behavior Ledger in the branded application's AppData directory was active, with a read-only sample of 1,093 records, contiguous sequence and previous-hash pointers. Its `EXECUTION` and `OBSERVED_RESULT` event labels **do not prove** server execution or E2E.
+- Python reference tests: 45/45 PASS. Source syntax tests and reference tests remain lower-level evidence than product-runtime tests.
+
+**Outstanding engineering conditions:** real APΩ native action dispatch, correlated MTProto ACK, observed post-action Telegram state, durable per-action recovery, and measured autonomous user value. Current default Ledger location follows `QStandardPaths::AppDataLocation` (application-name scope), not the explicit `-workdir` profile; multiple isolated profile instances may therefore share an APΩ ledger. Verify and resolve this boundary before accepting multi-profile or full crash-recovery claims. Keep sensitive Telegram credentials and raw chat data out of build logs, Git and artifacts.

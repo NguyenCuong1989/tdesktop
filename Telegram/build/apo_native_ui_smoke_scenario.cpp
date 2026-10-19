@@ -50,6 +50,12 @@ void SetupScenario(not_null<Runner*> runner) {
             }
             Check(apo::Runtime::Instance().isRunning(),
                 u"AP native runtime is running inside Telegram.exe"_q);
+            Check(QCoreApplication::applicationName() == u"OmegaTelegramDesktop"_q,
+                u"Omega Telegram native application name is independent"_q);
+            if (window) {
+                Check(window->windowTitle().contains(u"\u03A9-Telegram"_q),
+                    u"Omega Telegram identity is visible in native window title"_q);
+            }
         },
     });
     runner->add({
