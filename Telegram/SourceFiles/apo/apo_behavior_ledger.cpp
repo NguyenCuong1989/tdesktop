@@ -119,7 +119,10 @@ bool BehaviorLedger::recordEvent(
 	const QJsonObject &payload,
 	const QString &parentTraceId) {
 	QMutexLocker locker(&_mutex);
-	if (!_initialized) {
+	// A failed explicit init(path) must never silently fall back to the
+	// default AppData ledger. That would make a corrupted ledger appear
+	// writable and break the provenance of the entire event chain.
+	if (!_initialized && _filePath.isEmpty()) {
 		initUnlocked(QString());
 	}
 	if (!_initialized) {

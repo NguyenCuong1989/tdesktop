@@ -154,7 +154,9 @@ jobs:
 
           if ($ledger -notmatch 'void BehaviorLedger::initUnlocked\(' -or
               $ledger -notmatch 'QJsonDocument::fromJson\(' -or
-              $ledger -notmatch 'restoredSequence') {
+              $ledger -notmatch 'restoredSequence' -or
+              $ledger -notmatch 'if \(!_initialized && _filePath\.isEmpty\(\)\)' -or
+              !(Test-Path Telegram/build/apo_ledger_smoke.ps1)) {
               throw 'Ledger initialization/replay guard missing'
           }
           if ($stateBridge -notmatch '_self\.userId != accountUserId' -or
