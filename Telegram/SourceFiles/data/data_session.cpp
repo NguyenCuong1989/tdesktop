@@ -3696,7 +3696,9 @@ void Session::notifyUnreadBadgeChanged() {
 	_unreadBadgeChanges.fire({});
 
 	// APΩ Choke Point: Inbound Session Unread Count State Projection Hook
-	apo::StateBridge::Instance().updateUnreadCount(unreadBadge());
+	apo::StateBridge::Instance().updateUnreadCount(
+		session().userId().bare,
+		unreadBadge());
 }
 
 void Session::updateRepliesReadTill(RepliesReadTillUpdate update) {

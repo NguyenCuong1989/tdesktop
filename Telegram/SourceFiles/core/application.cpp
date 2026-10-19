@@ -227,6 +227,15 @@ Application::Application()
 				QString(),
 				QString(),
 				session->premium());
+			// Bootstrap unread state for this account; background accounts
+			// cannot overwrite the active account's AP? projection.
+			apo::StateBridge::Instance().updateUnreadCount(
+				session->userId().bare,
+				session->data().unreadBadge());
+		} else {
+			// Logout/no active account invalidates every projected account field.
+			apo::StateBridge::Instance().updateUserProfile(
+				0, QString(), QString(), QString(), QString(), false);
 		}
 	}, _lifetime);
 

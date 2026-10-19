@@ -140,6 +140,9 @@ jobs:
           $ledger = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.cpp -Raw
           $executor = Get-Content Telegram/SourceFiles/apo/apo_executor.cpp -Raw
           $loop = Get-Content Telegram/SourceFiles/apo/apo_cognitive_loop.cpp -Raw
+          $stateBridge = Get-Content Telegram/SourceFiles/apo/apo_state_bridge.cpp -Raw
+          $dataSession = Get-Content Telegram/SourceFiles/data/data_session.cpp -Raw
+          $application = Get-Content Telegram/SourceFiles/core/application.cpp -Raw
           $runtime = Get-Content Telegram/SourceFiles/apo/apo_runtime.cpp -Raw
           $mtproto = Get-Content Telegram/SourceFiles/mtproto/mtp_instance.cpp -Raw
           $callback = ($mtproto -split 'void Instance::Private::processCallback\(', 2)[1] -split 'void Instance::Private::processUpdate\(', 2
@@ -153,6 +156,12 @@ jobs:
               $ledger -notmatch 'QJsonDocument::fromJson\(' -or
               $ledger -notmatch 'restoredSequence') {
               throw 'Ledger initialization/replay guard missing'
+          }
+          if ($stateBridge -notmatch '_self\.userId != accountUserId' -or
+              $dataSession -notmatch 'session\(\)\.userId\(\)\.bare' -or
+              $application -notmatch 'updateUnreadCount\(' -or
+              $application -notmatch 'updateUserProfile\(\s*0, QString\(\)') {
+              throw 'Active-account state projection or logout reset is missing'
           }
           if ($executor -notmatch 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
               $loop -match 'ApoVerifier::Instance\(\)\.verifyAction\(' -or

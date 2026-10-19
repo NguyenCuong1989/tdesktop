@@ -22,6 +22,10 @@ void StateBridge::updateUserProfile(
 	const QString &lastName,
 	bool isPremium) {
 	QMutexLocker locker(&_mutex);
+	if (_self.userId != userId) {
+		// A session switch/logout must not leak the previous account's state.
+		_self = SelfState();
+	}
 	_self.userId = userId;
 	_self.username = username;
 	_self.phone = phone;
@@ -42,8 +46,11 @@ void StateBridge::updateUserProfile(
 		safeProfile);
 }
 
-void StateBridge::updateUnreadCount(int unreadTotal) {
+void StateBridge::updateUnreadCount(int64 accountUserId, int unreadTotal) {
 	QMutexLocker locker(&_mutex);
+	if (!accountUserId || _self.userId != accountUserId) {
+		return;
+	}
 	_self.unreadTotal = unreadTotal;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
 

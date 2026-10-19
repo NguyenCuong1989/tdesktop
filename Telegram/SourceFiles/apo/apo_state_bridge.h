@@ -55,7 +55,8 @@ public:
 		const QString &lastName,
 		bool isPremium);
 
-	void updateUnreadCount(int unreadTotal);
+	// Accept unread state only from the currently active account.
+	void updateUnreadCount(int64 accountUserId, int unreadTotal);
 	void updateBalances(int64 tonBalanceNano, int64 starsBalance);
 
 	[[nodiscard]] SelfState currentSelf() const;
