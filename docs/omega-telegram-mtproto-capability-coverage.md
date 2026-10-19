@@ -2,7 +2,7 @@
 
 Source of truth: Telegram/SourceFiles/mtproto/scheme/api.tl, source SHA-256 accad63235e1334bb4ff2f4a1de5c30ef4c46582ba9dfb2db413277b6814ee9b, fork HEAD at generation 379329222419f62398d35f752fe1a54d08428d20.
 
-The companion static capability index, omega-telegram-mtproto-capability-index.json, enumerates all **850 Telegram TL methods**, **1,704 type constructors**, and the **185 update-type constructors** that may provide incoming evidence. Each method has its source line number, TL ID, declared return type, functional domain, conservative operation hint, and separate APΩ wiring status.
+The companion static capability index, omega-telegram-mtproto-capability-index.json, enumerates all **850 Telegram TL methods**, **1,704 type constructors**, and the **185 update-type constructors** that may provide incoming evidence. Each entry also preserves its full TL signature and typed input fields, including optional flags and generic declarations. Each method has its source line number, TL ID, declared return type, functional domain, conservative operation hint, and separate APΩ wiring status.
 
 **Not a new subsystem:** the index is a read-only, source-grounded inventory. It grants no runtime capability, account permission, Creator authority, or autonomy.
 
@@ -74,3 +74,22 @@ Required lifecycle: OBSERVED -> PLANNED -> VERIFIED -> AUTHORIZED -> DISPATCHED 
 ## Next work, reusing existing source
 
 Expand typed input observations and effective-capability validation using the existing Telegram update/session handlers. Bind prioritized read and write actions to native methods through the existing AP Omega executor, not a wrapper. Prove source -> build -> real session -> action -> server response -> postcondition -> ledger -> crash/restart reconciliation while preserving Telegram Desktop upstream behavior and Creator authority.
+
+
+## Features that are not enumerated by the TL file
+
+The 850 method count is **only the MTProto API method surface**, not the complete Telegram Desktop feature count. Native sensory/motor interfaces also come from the existing C++ application: window, dialogs, history, media, calls, platform, storage, data, ui, and api. Local file access, notifications, app configuration, media processing, WebView/Mini Apps, session persistence, and UI settings can be local actions without any corresponding new TL method. External TON and other resource adapters likewise require their own typed evidence and authority.
+
+Mapping examples that reuse existing Telegram code:
+
+| Signal or observed input | Native observation source | Computation / decision target | Native action family | Independent result evidence |
+| --- | --- | --- | --- | --- |
+| New message, edit, read, mention | update* constructors + session/data/history | Context state, goal relevance, priority, Omega(P) | messages.sendMessage, editMessage, deleteMessages (when wired/authorized) | Server reply and resulting history item/update |
+| Chat/group/channel change | messages/channels/communities + dialog model | Rights, relationship graph, event priority | channels.* and messages.* | Membership/rights projection from Telegram |
+| Timer or backlog | Qt timer + durable ledger + current session | Pending goal, deadline, retry eligibility, optimization | Existing supported Telegram methods | Observed postcondition; unknown if timeout |
+| Stars, gift, payment | payments.* + native credits | Revenue, cost, capital, trust and policy | payments.* within Creator limits | Payment/transaction status, not a UI callback |
+| Calls, media, documents | phone.*, upload.*, local media modules | Task context, cost and permission | Existing Telegram calls/media subsystems | Call/media state confirmation |
+| Creator UI intent | Native Qt actions, per-account Self | Goal, authority changes, scheduling | AP Omega native action gate | Updated goals/policy and durable audit |
+| External TON or Mini App | Native WebView and external adapter when implemented | Economy formula, source credibility, available funds | Authorized wallet/Mini App interfaces | External receipt + reconciliation |
+
+**Do not run every formula on every packet.** Normalize all allowed evidence, select the relevant existing computation modules by event type and goal, then fuse outputs into a candidate action and verify its authority and effects. A module with unknown inputs emits UNKNOWN, not an invented decision.
