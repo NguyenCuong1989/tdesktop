@@ -67,9 +67,30 @@ VerificationResult ApoVerifier::verifyAction(
 		return res;
 	}
 
-	// 2. Canonical Omega(P) Convergence Gate
-	// Baseline state: S0 = (C=0.0, R=0.07, E=1.0, B=0.985)
-	const ApoStateQuad s0{ 0.0, 0.07, 1.0, 0.985 };
+	// 2. Runtime Omega(P) requires an observed, provenance-linked S0.
+	// The sealed mathematical S0/S1 fixture belongs in tests only.
+	const auto previous = parameters.value(QStringLiteral("apo_previous_state"));
+	const auto provenance = parameters.value(QStringLiteral("apo_previous_state_source"));
+	if (!previous.isObject() || provenance.toString().isEmpty()) {
+		res.passed = false;
+		res.rationale = QStringLiteral("UNKNOWN: APO_PREVIOUS_STATE_EVIDENCE_MISSING");
+		return res;
+	}
+	const auto state = previous.toObject();
+	const auto get = [&](const char *name, double &value) {
+		const auto json = state.value(QLatin1String(name));
+		if (!json.isDouble()) return false;
+		value = json.toDouble();
+		return std::isfinite(value);
+	};
+	ApoStateQuad s0;
+	if (!get("C", s0.C) || !get("R", s0.R)
+		|| !get("E", s0.E) || !get("B", s0.B)
+		|| !s0.withinDomain()) {
+		res.passed = false;
+		res.rationale = QStringLiteral("UNKNOWN: INVALID_APO_PREVIOUS_STATE");
+		return res;
+	}
 	res.omega = evaluateOmega(s0, candidateState);
 
 	if (!res.omega.converged) {
