@@ -19,6 +19,7 @@ AuthorityManager::AuthorityManager() {
 	_actionPolicies[QStringLiteral("channel.scan_public")] = AuthorityLevel::AutoExecuteAllowed;
 	_actionPolicies[QStringLiteral("messages.search_local")] = AuthorityLevel::AutoExecuteAllowed;
 	_actionPolicies[QStringLiteral("compute.opportunity_ranking")] = AuthorityLevel::AutoExecuteAllowed;
+	_actionPolicies[QStringLiteral("dialogs.inspect_server")] = AuthorityLevel::AutoExecuteAllowed;
 	_actionPolicies[QStringLiteral("compute.draft_reply")] = AuthorityLevel::AutoExecuteAllowed;
 
 	// High-stakes actions strictly require user approval by default

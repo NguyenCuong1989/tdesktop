@@ -201,6 +201,25 @@ void SetupScenario(not_null<Runner*> runner) {
         },
     });
     runner->add({
+        .name = u"native server inspection requires authenticated session"_q,
+        .then = [] {
+            auto receipt = std::make_shared<std::pair<bool, bool>>(false, true);
+            const apo::ApoStateQuad valid{ 0.0, 0.05, 1.0, 0.99 };
+            apo::ActionExecutor::Instance().submitAction(
+                u"dialogs.inspect_server"_q,
+                u"native_main_dialogs"_q,
+                QJsonObject(),
+                u"test fixture verifies no network without authorized session"_q,
+                valid,
+                [receipt](bool success) {
+                    receipt->first = true;
+                    receipt->second = success;
+                });
+            Check(receipt->first && !receipt->second,
+                u"native RPC inspection rejects unauthenticated client without dispatch"_q);
+        },
+    });
+    runner->add({
         .name = u"native APΩ action must not fabricate server success"_q,
         .then = [] {
             auto receipt = std::make_shared<std::pair<bool, bool>>(false, true);

@@ -63,6 +63,7 @@ void CognitiveLoop::stop() {
 	}
 	_running = false;
 	_lastRankingAccount = 0;
+	_lastRemoteInspectionAccount = 0;
 	_lastRankingEvidence.clear();
 	if (_loopTimer) {
 		_loopTimer->stop();
@@ -186,15 +187,56 @@ void CognitiveLoop::step() {
 	observation[QStringLiteral("native_dispatch")] = false;
 	// No peer IDs, chat names or message text leave the native process.
 	const auto snapshot = QJsonDocument(observation).toJson(QJsonDocument::Compact);
+	auto rankingPersisted = true;
 	if (_lastRankingAccount != self.userId
 		|| _lastRankingEvidence != snapshot) {
-		if (RecordBehavior(EventType::Computation,
+		rankingPersisted = RecordBehavior(EventType::Computation,
 			traceId,
 			QStringLiteral("apo.cognitive.unread_ranking"),
-			observation)) {
+			observation);
+		if (rankingPersisted) {
 			_lastRankingAccount = self.userId;
 			_lastRankingEvidence = snapshot;
 		}
+	}
+	// One bounded, read-only Telegram server inspection per active account
+	// and process. This is a real MTProto operation via ActionExecutor,
+	// never a fabricated response or an unrestricted message send.
+	if (rankingPersisted && list->loaded() && limit > 0 && knownRows > 0
+		&& !ranked.empty() && limit == int(rows.size())
+		&& _lastRemoteInspectionAccount != self.userId) {
+		// E is directly measured state coverage. C is an explicit one-query
+		// fraction of the bounded 512-row inspection budget, an ESTIMATE.
+		// R/B retain the sealed baseline priors, NOT account measurements.
+		// Never present these priors as empirically known risk or authority.
+		const ApoStateQuad candidate{
+			1.0 / double(kMaxInspected),
+			0.07,
+			double(knownRows) / double(limit),
+			0.985
+		};
+		QJsonObject params;
+		params[QStringLiteral("source_trace_id")] = traceId;
+		params[QStringLiteral("loaded_rows")] = int(rows.size());
+		params[QStringLiteral("known_rows")] = knownRows;
+		params[QStringLiteral("expected_result")] =
+			QStringLiteral("native getDialogs response with local chat projection match");
+		params[QStringLiteral("state_model_provenance")] =
+			QStringLiteral("C:bounded_query_budget_ESTIMATE;"
+				"E:measured_native_known_row_fraction;"
+				"R_B:sealed_baseline_PRIORS_NOT_MEASURED");
+		_lastRemoteInspectionAccount = self.userId;
+		ActionExecutor::Instance().submitAction(
+			QStringLiteral("dialogs.inspect_server"),
+			QStringLiteral("native_main_dialogs"),
+			params,
+			QStringLiteral("Verify local unread context against native Telegram server"),
+			candidate,
+			[](bool success) {
+				// No economy or trust reward is issued just for RPC success.
+				// A read-only success is not evidence of customer value.
+				(void)success;
+			});
 	}
 }
 

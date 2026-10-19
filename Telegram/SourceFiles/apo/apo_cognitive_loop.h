@@ -37,6 +37,7 @@ private:
 	std::unique_ptr<QTimer> _loopTimer;
 	int64 _cycleCount = 0;
 	int64 _lastRankingAccount = 0;
+	int64 _lastRemoteInspectionAccount = 0;
 	QByteArray _lastRankingEvidence;
 };
 

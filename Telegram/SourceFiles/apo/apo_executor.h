@@ -15,25 +15,44 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace apo {
 
-// Standardized 6-Phase Action Lifecycle:
-// PLANNED -> VERIFIED -> SENT -> ACKNOWLEDGED -> OBSERVED -> CLOSED
+// Contract for an APΩ operation in the native Telegram process.
+// Transition evidence is issued by the owner of each native operation;
+// stringifying an enum must never itself constitute an ACK or success.
 enum class ActionPhase {
+	Observed,
 	Planned,
 	Verified,
-	Sent,
+	Authorized,
+	Dispatched,
 	Acknowledged,
-	Observed,
-	Closed
+	StateConfirmed,
+	Closed,
+	Rejected,
+	Denied,
+	PendingAuthority,
+	Failed,
+	TimedOut,
+	UnknownOutcome,
+	Reconciling
 };
 
 [[nodiscard]] inline QString ActionPhaseToString(ActionPhase phase) {
 	switch (phase) {
+	case ActionPhase::Observed: return QStringLiteral("OBSERVED");
 	case ActionPhase::Planned: return QStringLiteral("PLANNED");
 	case ActionPhase::Verified: return QStringLiteral("VERIFIED");
-	case ActionPhase::Sent: return QStringLiteral("SENT");
+	case ActionPhase::Authorized: return QStringLiteral("AUTHORIZED");
+	case ActionPhase::Dispatched: return QStringLiteral("DISPATCHED");
 	case ActionPhase::Acknowledged: return QStringLiteral("ACKNOWLEDGED");
-	case ActionPhase::Observed: return QStringLiteral("OBSERVED");
+	case ActionPhase::StateConfirmed: return QStringLiteral("STATE_CONFIRMED");
 	case ActionPhase::Closed: return QStringLiteral("CLOSED");
+	case ActionPhase::Rejected: return QStringLiteral("REJECTED");
+	case ActionPhase::Denied: return QStringLiteral("DENIED");
+	case ActionPhase::PendingAuthority: return QStringLiteral("PENDING_AUTHORITY");
+	case ActionPhase::Failed: return QStringLiteral("FAILED");
+	case ActionPhase::TimedOut: return QStringLiteral("TIMED_OUT");
+	case ActionPhase::UnknownOutcome: return QStringLiteral("UNKNOWN_OUTCOME");
+	case ActionPhase::Reconciling: return QStringLiteral("RECONCILING");
 	}
 	return QStringLiteral("UNKNOWN");
 }
@@ -78,10 +97,6 @@ private:
 	ActionExecutor &operator=(const ActionExecutor &) = delete;
 
 	void executeInternal(const PendingAction &action);
-
-	// Private until a native dispatch adapter can verify each transition against
-	// a matching Telegram request/response/update, not an intent label.
-	void advancePhase(const QString &actionId, ActionPhase newPhase);
 
 	mutable QMutex _mutex;
 	QMap<QString, PendingAction> _pendingActions;

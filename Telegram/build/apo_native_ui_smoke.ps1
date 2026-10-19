@@ -82,6 +82,7 @@ try {
         'TEST_RESULT: PASS: invalid negative unread count is ignored',
         'TEST_RESULT: PASS: anonymous cognitive fixture has no authorized account',
         'TEST_RESULT: PASS: anonymous step records one observation but no fabricated action',
+        'TEST_RESULT: PASS: native RPC inspection rejects unauthenticated client without dispatch',
         'TEST_RESULT: PASS: unwired native dispatch must complete with failure not success'
     )
     foreach($marker in $required){

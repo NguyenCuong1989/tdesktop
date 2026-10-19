@@ -24,6 +24,7 @@ $rpcPending = @{}
 $rpcMethods = @{}
 $rpcDurations = New-Object 'System.Collections.Generic.List[double]'
 $rpcEpoch = 0
+$nativeActionTrace = @{}
 $lastUnreadValue = $null
 $lastRuntimeUnreadEvents = 0
 $lastRuntimeRepeatedUnreadValues = 0
@@ -93,6 +94,58 @@ try {
                     $lastRuntimeLatestUnread = $null
                     $lastRuntimeRankingEvents = 0
                     $lastNativeUnreadRanking = $null
+                }
+                # Follow the causal chain of a native APΩ read-only
+                # operation. Telegram's ordinary MTProto telemetry does
+                # not count as an APΩ action unless action_id links it.
+                $actionId = if ($props.ContainsKey('action_id')) {
+                    [string]$props['action_id']
+                } else { '' }
+                if ($actor -eq 'apo.agent_core' -and
+                    $props.ContainsKey('action_type') -and
+                    $props['action_type'] -eq 'dialogs.inspect_server' -and
+                    $actionId -ne '' -and
+                    !$nativeActionTrace.ContainsKey($actionId)) {
+                    $nativeActionTrace[$actionId] = [ordered]@{
+                        actionId=$actionId
+                        startSequence=$sequence
+                        phases=[System.Collections.ArrayList]::new()
+                        requestId=$null
+                        mismatchedRequestIds=0
+                        serverDialogCount=$null
+                        localProjectionMatches=$null
+                        lastResult=''
+                        lastSequence=$sequence
+                    }
+                }
+                if ($actionId -ne '' -and
+                    $nativeActionTrace.ContainsKey($actionId)) {
+                    $trace = $nativeActionTrace[$actionId]
+                    if ($props.ContainsKey('new_phase')) {
+                        [void]$trace.phases.Add([string]$props['new_phase'])
+                    } elseif ($props.ContainsKey('phase')) {
+                        [void]$trace.phases.Add([string]$props['phase'])
+                    }
+                    if ($props.ContainsKey('request_id') -and
+                        $null -ne $props['request_id']) {
+                        $reqId = [long]$props['request_id']
+                        if ($null -eq $trace.requestId) {
+                            $trace.requestId = $reqId
+                        } elseif ($trace.requestId -ne $reqId) {
+                            $trace.mismatchedRequestIds++
+                        }
+                    }
+                    if ($props.ContainsKey('server_dialogs')) {
+                        $trace.serverDialogCount = [int]$props['server_dialogs']
+                    }
+                    if ($props.ContainsKey('native_projection_matches')) {
+                        $trace.localProjectionMatches =
+                            [int]$props['native_projection_matches']
+                    }
+                    if ($props.ContainsKey('result')) {
+                        $trace.lastResult = [string]$props['result']
+                    }
+                    $trace.lastSequence = $sequence
                 }
                 if ($actor -eq 'apo.state_bridge.unread' -and
                     $props.ContainsKey('unread_total')) {
@@ -209,6 +262,44 @@ $p95 = if ($durationsSorted.Count) {
     $idx = [int][Math]::Ceiling($durationsSorted.Count * 0.95) - 1
     $durationsSorted[[Math]::Max(0, $idx)]
 } else { $null }
+$nativeReadActions = @()
+foreach ($entry in $nativeActionTrace.GetEnumerator()) {
+    $trace = $entry.Value
+    $observedPhases = @($trace.phases)
+    $required = @('PLANNED','VERIFIED','AUTHORIZED',
+        'DISPATCHED','ACKNOWLEDGED','STATE_CONFIRMED','CLOSED')
+    $next = 0
+    foreach ($phase in $observedPhases) {
+        if ($next -lt $required.Count -and $phase -eq $required[$next]) {
+            $next++
+        }
+    }
+    $phaseOrderValid = ($next -eq $required.Count)
+    $postconditionValid = ($null -ne $trace.serverDialogCount -and
+        $null -ne $trace.localProjectionMatches -and
+        $trace.serverDialogCount -gt 0 -and
+        $trace.localProjectionMatches -gt 0 -and
+        $trace.localProjectionMatches -le $trace.serverDialogCount)
+    $e2eVerified = ($phaseOrderValid -and $postconditionValid -and
+        $trace.requestId -gt 0 -and $trace.mismatchedRequestIds -eq 0 -and
+        $trace.lastResult -eq 'SUCCESS_READ_ONLY')
+    $nativeReadActions += [pscustomobject]@{
+        actionId=$trace.actionId
+        firstSeq=$trace.startSequence
+        lastSeq=$trace.lastSequence
+        requestId=$trace.requestId
+        phases=$observedPhases
+        remoteDialogs=$trace.serverDialogCount
+        nativeMatchedDialogs=$trace.localProjectionMatches
+        lastResult=$trace.lastResult
+        phaseOrderValid=$phaseOrderValid
+        readOnlyE2EVerified=$e2eVerified
+    }
+}
+$nativeReadActions = @($nativeReadActions | Sort-Object firstSeq)
+$e2eCount = @($nativeReadActions | Where-Object {
+    $_.readOnlyE2EVerified
+}).Count
 $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debug\Telegram.exe'
 [ordered]@{
     tool='Ω-Telegram native behavior evidence audit'
@@ -224,6 +315,9 @@ $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debu
     submittedActionTypes=Rows $actions
     nativeRpcMethods=Rows $rpcMethods
     nativeRpcLatencyP95Ms=$p95
+    nativeAPOReadActionCount=$nativeReadActions.Count
+    nativeAPOReadClosedVerified=$e2eCount
+    nativeAPOReadTraces=@($nativeReadActions | Select-Object -Last 8)
     lastRuntimeUnreadEvents=$lastRuntimeUnreadEvents
     lastRuntimeRepeatedUnreadValues=$lastRuntimeRepeatedUnreadValues
     lastRuntimeLatestUnread=$lastRuntimeLatestUnread
