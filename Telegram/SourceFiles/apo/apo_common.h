@@ -19,6 +19,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace apo {
 
+// Define the APΩ integer type explicitly so native modules compile
+// independently of Telegram Desktop precompiled headers.
+using int64 = qint64;
+
 // Universal System Behavior Event Types
 enum class EventType {
 	UiEvent,          // Real mouse/key/UI interaction

@@ -12,6 +12,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_forum.h"
 #include "data/data_message_reactions.h"
 #include "data/data_session.h"
+#include "data/components/credits.h"
+#include "core/credits_amount.h"
 #include "data/data_download_manager.h"
 #include "base/battery_saving.h"
 #include "base/event_filter.h"
@@ -215,6 +217,8 @@ Application::Application()
 
 	_domain->activeSessionChanges(
 	) | rpl::on_next([=](Main::Session *session) {
+		// Dispose previous account subscriptions before replacing its projection.
+		_apoCreditsLifetime.reset();
 		if (session) {
 			if (!UpdaterDisabled()) { // #TODO multi someSessionValue
 				UpdateChecker().setMtproto(session);
@@ -228,10 +232,54 @@ Application::Application()
 				QString(),
 				session->premium());
 			// Bootstrap unread state for this account; background accounts
-			// cannot overwrite the active account's AP? projection.
+			// cannot overwrite the active account's APΩ projection.
 			apo::StateBridge::Instance().updateUnreadCount(
 				session->userId().bare,
 				session->data().unreadBadge());
+
+			// Source of truth: the official Telegram Credits service for THIS
+			// active account. In-app TON is not an external wallet balance.
+			_apoCreditsLifetime = std::make_unique<rpl::lifetime>();
+			const auto refreshCredits = [=] {
+				const auto &credits = session->credits();
+				if (credits.loaded()) {
+					const auto value = credits.balance();
+					if (value.stars()) {
+						apo::StateBridge::Instance().updateStarsCredits(
+							session->userId().bare,
+							value.whole(),
+							value.nano());
+					}
+				}
+				if (credits.tonLoaded()) {
+					const auto value = credits.tonBalance();
+					if (value.ton()) {
+						apo::StateBridge::Instance().updateTelegramTonCredits(
+							session->userId().bare,
+							value.whole(),
+							value.nano());
+					}
+				}
+			};
+			auto &credits = session->credits();
+			credits.loadedValue(
+			) | rpl::on_next([=](bool) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.balanceValue(
+			) | rpl::on_next([=](CreditsAmount) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.tonLoadedValue(
+			) | rpl::on_next([=](bool) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.tonBalanceValue(
+			) | rpl::on_next([=](CreditsAmount) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.load();
+			credits.tonLoad();
 		} else {
 			// Logout/no active account invalidates every projected account field.
 			apo::StateBridge::Instance().updateUserProfile(

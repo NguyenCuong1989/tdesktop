@@ -63,20 +63,76 @@ void StateBridge::updateUnreadCount(int64 accountUserId, int unreadTotal) {
 		payload);
 }
 
-void StateBridge::updateBalances(int64 tonBalanceNano, int64 starsBalance) {
+void StateBridge::updateBalances(int64 accountUserId, int64 tonBalanceNano, int64 starsBalance) {
 	QMutexLocker locker(&_mutex);
+	if (!accountUserId || _self.userId != accountUserId) {
+		return;
+	}
 	_self.tonBalanceNano = tonBalanceNano;
+	_self.tonWalletBalanceKnown = true;
 	_self.starsBalance = starsBalance;
+	_self.starsBalanceNano = 0;
+	_self.starsBalanceKnown = true;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
 
 	QJsonObject payload;
-	payload[QStringLiteral("ton_balance_nano")] = static_cast<qint64>(tonBalanceNano);
-	payload[QStringLiteral("stars_balance")] = static_cast<qint64>(starsBalance);
+	payload[QStringLiteral("ton_wallet_balance_updated")] = true;
+	payload[QStringLiteral("stars_balance_updated")] = true;
 	RecordBehavior(
 		EventType::StateReduce,
 		QString(),
 		QStringLiteral("apo.state_bridge.balances"),
 		payload);
+}
+
+void StateBridge::updateStarsCredits(
+	int64 accountUserId,
+	int64 whole,
+	int64 nano) {
+	QMutexLocker locker(&_mutex);
+	if (!accountUserId || _self.userId != accountUserId
+		|| nano < 0 || nano >= 1000000000) {
+		return;
+	}
+	if (_self.starsBalanceKnown
+		&& _self.starsBalance == whole
+		&& _self.starsBalanceNano == nano) {
+		return;
+	}
+	_self.starsBalance = whole;
+	_self.starsBalanceNano = nano;
+	_self.starsBalanceKnown = true;
+	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
+	QJsonObject payload;
+	payload[QStringLiteral("source")] = QStringLiteral("telegram_credits_stars");
+	payload[QStringLiteral("balance_loaded")] = true;
+	RecordBehavior(EventType::StateReduce, QString(),
+		QStringLiteral("apo.state_bridge.stars"), payload);
+}
+
+void StateBridge::updateTelegramTonCredits(
+	int64 accountUserId,
+	int64 whole,
+	int64 nano) {
+	QMutexLocker locker(&_mutex);
+	if (!accountUserId || _self.userId != accountUserId
+		|| nano < 0 || nano >= 1000000000) {
+		return;
+	}
+	if (_self.telegramTonKnown
+		&& _self.telegramTonWhole == whole
+		&& _self.telegramTonNano == nano) {
+		return;
+	}
+	_self.telegramTonWhole = whole;
+	_self.telegramTonNano = nano;
+	_self.telegramTonKnown = true;
+	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
+	QJsonObject payload;
+	payload[QStringLiteral("source")] = QStringLiteral("telegram_credits_ton");
+	payload[QStringLiteral("balance_loaded")] = true;
+	RecordBehavior(EventType::StateReduce, QString(),
+		QStringLiteral("apo.state_bridge.telegram_ton"), payload);
 }
 
 SelfState StateBridge::currentSelf() const {

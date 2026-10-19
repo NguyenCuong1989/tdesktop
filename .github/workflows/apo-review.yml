@@ -163,6 +163,13 @@ jobs:
               $application -notmatch 'updateUserProfile\(\s*0, QString\(\)') {
               throw 'Active-account state projection or logout reset is missing'
           }
+          if ($application -notmatch 'credits\.balanceValue\(' -or
+              $application -notmatch 'credits\.tonBalanceValue\(' -or
+              $application -notmatch '_apoCreditsLifetime\.reset\(' -or
+              $stateBridge -notmatch 'updateStarsCredits\(' -or
+              $stateBridge -notmatch 'updateTelegramTonCredits\(') {
+              throw 'Scoped native Telegram Stars/TON credit observation missing'
+          }
           if ($executor -notmatch 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
               $loop -match 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
               $executor -notmatch 'if \(!RecordBehavior\(EventType::ApoVerify') {

@@ -22,8 +22,15 @@ struct SelfState {
 	bool isPremium = false;
 	int unreadTotal = 0;
 	int activeDialogsCount = 0;
+	// External wallet TON is distinct from Telegram's in-app TON credits.
 	int64 tonBalanceNano = 0;
+	bool tonWalletBalanceKnown = false;
+	int64 telegramTonWhole = 0;
+	int64 telegramTonNano = 0;
+	bool telegramTonKnown = false;
 	int64 starsBalance = 0;
+	int64 starsBalanceNano = 0;
+	bool starsBalanceKnown = false;
 	int64 lastUpdatedMs = 0;
 
 	[[nodiscard]] QJsonObject toJson() const {
@@ -36,8 +43,20 @@ struct SelfState {
 		obj[QStringLiteral("is_premium")] = isPremium;
 		obj[QStringLiteral("unread_total")] = unreadTotal;
 		obj[QStringLiteral("active_dialogs_count")] = activeDialogsCount;
-		obj[QStringLiteral("ton_balance_nano")] = static_cast<qint64>(tonBalanceNano);
-		obj[QStringLiteral("stars_balance")] = static_cast<qint64>(starsBalance);
+		obj[QStringLiteral("ton_wallet_balance_known")] = tonWalletBalanceKnown;
+		if (tonWalletBalanceKnown) {
+			obj[QStringLiteral("ton_balance_nano")] = static_cast<qint64>(tonBalanceNano);
+		}
+		obj[QStringLiteral("telegram_ton_balance_known")] = telegramTonKnown;
+		if (telegramTonKnown) {
+			obj[QStringLiteral("telegram_ton_whole")] = static_cast<qint64>(telegramTonWhole);
+			obj[QStringLiteral("telegram_ton_fractional_nano")] = static_cast<qint64>(telegramTonNano);
+		}
+		obj[QStringLiteral("stars_balance_known")] = starsBalanceKnown;
+		if (starsBalanceKnown) {
+			obj[QStringLiteral("stars_balance")] = static_cast<qint64>(starsBalance);
+			obj[QStringLiteral("stars_fractional_nano")] = static_cast<qint64>(starsBalanceNano);
+		}
 		obj[QStringLiteral("last_updated_ms")] = static_cast<qint64>(lastUpdatedMs);
 		return obj;
 	}
@@ -57,7 +76,9 @@ public:
 
 	// Accept unread state only from the currently active account.
 	void updateUnreadCount(int64 accountUserId, int unreadTotal);
-	void updateBalances(int64 tonBalanceNano, int64 starsBalance);
+	void updateBalances(int64 accountUserId, int64 tonBalanceNano, int64 starsBalance);
+	void updateStarsCredits(int64 accountUserId, int64 whole, int64 nano);
+	void updateTelegramTonCredits(int64 accountUserId, int64 whole, int64 nano);
 
 	[[nodiscard]] SelfState currentSelf() const;
 
