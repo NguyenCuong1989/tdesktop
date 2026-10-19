@@ -15,6 +15,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_session.h"
 #include "data/data_session.h"
 #include "dialogs/dialogs_main_list.h"
+#include "settings.h"
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
@@ -237,28 +239,84 @@ void CognitiveLoop::step() {
 	const auto inspectionDue = !_remoteInspectionInFlight
 		&& (_lastRemoteInspectionAtMs == 0
 			|| (elapsedMs >= 0 && elapsedMs >= revisitMs));
-	if (rankingPersisted && list->loaded() && limit > 0 && knownRows > 0
-		&& !ranked.empty() && limit == int(rows.size()) && inspectionDue) {
-		// E is directly measured state coverage. C is an explicit one-query
-		// fraction of the bounded 512-row inspection budget, an ESTIMATE.
-		// R/B retain the sealed baseline priors, NOT account measurements.
-		// Never present these priors as empirically known risk or authority.
-		const ApoStateQuad candidate{
-			1.0 / double(kMaxInspected),
-			0.07,
+
+	// Native observations define the Ω state for THIS read-only domain:
+	// C = observed inspected-row capacity fraction (limit / 512);
+	// R = observed unknown-unread fraction (measurement uncertainty);
+	// E = observed known-unread fraction; B = fully loaded/covered boundary.
+	// These are measured Telegram projections, not economic risk estimates
+	// or the sealed baseline priors. Never substitute missing measurements.
+	const auto accountScope = QString::fromUtf8(QCryptographicHash::hash(
+		(QString::number(self.userId) + QStringLiteral("|")
+			+ cWorkingDir()).toUtf8(),
+		QCryptographicHash::Sha256).toHex());
+	const auto measurementComplete = list->loaded() && limit > 0
+		&& knownRows > 0 && limit == int(rows.size());
+	const auto previous = measurementComplete
+		? BehaviorLedger::Instance().latestOmegaState(accountScope)
+		: std::nullopt;
+	ApoStateQuad measured;
+	if (measurementComplete) {
+		measured = {
+			double(limit) / double(kMaxInspected),
+			double(limit - knownRows) / double(limit),
 			double(knownRows) / double(limit),
-			0.985
+			1.0
 		};
+	}
+	QJsonObject measuredPayload;
+	measuredPayload[QStringLiteral("kind")] = QStringLiteral("NATIVE_DIALOGS_STATE");
+	measuredPayload[QStringLiteral("source")] = QStringLiteral("Data::Session.chatsList");
+	measuredPayload[QStringLiteral("account_scope")] = accountScope;
+	measuredPayload[QStringLiteral("measurement_complete")] = measurementComplete;
+	measuredPayload[QStringLiteral("measured_at_ms")] = static_cast<qint64>(nowMs);
+	measuredPayload[QStringLiteral("inspected_rows")] = limit;
+	measuredPayload[QStringLiteral("total_loaded_rows")] = int(rows.size());
+	measuredPayload[QStringLiteral("known_rows")] = knownRows;
+	measuredPayload[QStringLiteral("source_loaded")] = list->loaded();
+	measuredPayload[QStringLiteral("state")] = measurementComplete
+		? measured.toJson() : QJsonObject();
+	if (!RecordBehavior(EventType::StateReduce, traceId,
+		QStringLiteral("apo.cognitive.omega_measurement"), measuredPayload)) {
+		return; // No state transition without a durable observation.
+	}
+	if (inspectionDue && (!measurementComplete || !previous
+		|| previous->timestampMs >= nowMs)) {
+		QJsonObject wait;
+		wait[QStringLiteral("decision")] = QStringLiteral("WAIT_FOR_DATA");
+		wait[QStringLiteral("reason")] = !measurementComplete
+			? QStringLiteral("NATIVE_STATE_INCOMPLETE")
+			: (!previous ? QStringLiteral("PREVIOUS_OBSERVATION_MISSING")
+				: QStringLiteral("PREVIOUS_OBSERVATION_NOT_OLDER"));
+		wait[QStringLiteral("account_scope")] = accountScope;
+		wait[QStringLiteral("current_state_source")] = traceId;
+		RecordBehavior(EventType::Decision, traceId,
+			QStringLiteral("apo.cognitive.omega_gate"), wait);
+	}
+	if (rankingPersisted && measurementComplete && previous
+		&& previous->timestampMs < nowMs
+		&& !ranked.empty() && inspectionDue) {
+		// S0 and S1 came from distinct native observation cycles.
+		// The ledger verifies their hash-chain-backed account scope and order.
+		const auto candidate = measured;
 		QJsonObject params;
 		params[QStringLiteral("source_trace_id")] = traceId;
+		params[QStringLiteral("apo_account_scope")] = accountScope;
+		params[QStringLiteral("apo_state_domain")] =
+			QStringLiteral("dialogs.inspect_server");
+		params[QStringLiteral("apo_previous_state")] = previous->state;
+		params[QStringLiteral("apo_previous_state_source")] = previous->traceId;
+		params[QStringLiteral("apo_current_state_source")] = traceId;
 		params[QStringLiteral("loaded_rows")] = int(rows.size());
 		params[QStringLiteral("known_rows")] = knownRows;
 		params[QStringLiteral("expected_result")] =
 			QStringLiteral("native getDialogs response with local chat projection match");
 		params[QStringLiteral("state_model_provenance")] =
-			QStringLiteral("C:bounded_query_budget_ESTIMATE;"
-				"E:measured_native_known_row_fraction;"
-				"R_B:sealed_baseline_PRIORS_NOT_MEASURED");
+			QStringLiteral("C:inspected_rows_over_512;"
+				"R:unknown_unread_rows_over_inspected;"
+				"E:known_unread_rows_over_inspected;"
+				"B:loaded_and_full_coverage;"
+				"source:Data::Session.chatsList");
 		_lastRemoteInspectionAtMs = nowMs;
 		_lastRemoteInspectionSucceeded = false;
 		_remoteInspectionInFlight = true;

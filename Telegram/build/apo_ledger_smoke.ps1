@@ -43,4 +43,16 @@ if ($modified -eq $original) { throw "Test setup: ledger tamper sentinel absent"
 if ($LASTEXITCODE -ne 0) { throw "Corrupt ledger wrongly accepted or fell back to default: $LASTEXITCODE" }
 Write-Output '[PASS] corrupt ledger refuses further writes'
 Write-Output ('[EVIDENCE] original_sha256=' + (Get-FileHash $ledger -Algorithm SHA256).Hash)
-Write-Output '[PASS] native ledger smoke 4/4'
+$stateLedger = Join-Path $out 'omega-state-valid.jsonl'
+$invalidLedger = Join-Path $out 'omega-state-invalid.jsonl'
+Remove-Item -LiteralPath $stateLedger, $invalidLedger -ErrorAction SilentlyContinue
+foreach ($case in @(
+    @{ Mode = 'state-write'; Path = $stateLedger },
+    @{ Mode = 'state-reopen'; Path = $stateLedger },
+    @{ Mode = 'state-invalid'; Path = $invalidLedger }
+)) {
+    & $exe $case.Mode $case.Path
+    if ($LASTEXITCODE -ne 0) { throw "Omega state evidence $($case.Mode) failed: $LASTEXITCODE" }
+    Write-Output "[PASS] $($case.Mode)"
+}
+Write-Output '[PASS] native ledger smoke 7/7'

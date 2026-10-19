@@ -25,6 +25,71 @@ BehaviorLedger::~BehaviorLedger() {
 	flush();
 }
 
+void BehaviorLedger::indexOmegaStateUnlocked(
+	const QString &eventType,
+	const QString &actor,
+	const QString &traceId,
+	const QJsonObject &payload,
+	int64 timestampMs) {
+	// Only an actual, hash-chain-persisted native observation may enter
+	// the state history. A model prior or arbitrary caller-supplied S0
+	// cannot be promoted into evidence by naming a trace ID.
+	if (eventType != QStringLiteral("RAW.STATE_REDUCE")
+		|| actor != QStringLiteral("apo.cognitive.omega_measurement")
+		|| payload.value(QStringLiteral("kind")).toString()
+			!= QStringLiteral("NATIVE_DIALOGS_STATE")
+		|| !payload.value(QStringLiteral("measurement_complete")).toBool()
+		|| payload.value(QStringLiteral("source")).toString()
+			!= QStringLiteral("Data::Session.chatsList")
+		|| traceId.isEmpty() || timestampMs <= 0) {
+		return;
+	}
+	const auto scope = payload.value(QStringLiteral("account_scope")).toString();
+	const auto value = payload.value(QStringLiteral("state"));
+	if (scope.isEmpty() || !value.isObject()) {
+		return;
+	}
+	const auto state = value.toObject();
+	for (const auto name : { "C", "R", "E", "B" }) {
+		const auto component = state.value(QLatin1String(name));
+		if (!component.isDouble() || !std::isfinite(component.toDouble())
+			|| component.toDouble() < 0.0 || component.toDouble() > 1.0) {
+			return;
+		}
+	}
+	// Recompute all four operands from the persisted native observation
+	// contract. The sealed fixture values can never enter this index.
+	const auto inspected = payload.value(QStringLiteral("inspected_rows")).toInt(-1);
+	const auto total = payload.value(QStringLiteral("total_loaded_rows")).toInt(-1);
+	const auto known = payload.value(QStringLiteral("known_rows")).toInt(-1);
+	const auto measuredAt = static_cast<int64>(
+		payload.value(QStringLiteral("measured_at_ms")).toDouble());
+	if (!payload.value(QStringLiteral("source_loaded")).toBool()
+		|| inspected <= 0 || inspected > 512 || total != inspected
+		|| known <= 0 || known > inspected || measuredAt <= 0
+		|| measuredAt > timestampMs || timestampMs - measuredAt > 5000) {
+		return;
+	}
+	const auto matches = [&](const char *key, double expected) {
+		return std::abs(state.value(QLatin1String(key)).toDouble() - expected)
+			< 1e-12;
+	};
+	if (!matches("C", double(inspected) / 512.0)
+		|| !matches("R", double(inspected - known) / double(inspected))
+		|| !matches("E", double(known) / double(inspected))
+		|| !matches("B", 1.0)) {
+		return;
+	}
+	auto &history = _omegaHistory[scope];
+	if (!history.isEmpty() && history.constLast().timestampMs >= timestampMs) {
+		return; // A clock rollback cannot silently authorize a transition.
+	}
+	history.push_back({ traceId, scope, state, timestampMs });
+	if (history.size() > 2) {
+		history.remove(0);
+	}
+}
+
 void BehaviorLedger::init(const QString &storagePath) {
 	QMutexLocker locker(&_mutex);
 	initUnlocked(storagePath);
@@ -34,6 +99,7 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 	if (_initialized) {
 		return;
 	}
+	_omegaHistory.clear();
 
 	if (storagePath.isEmpty()) {
 		const auto appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -99,6 +165,13 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 				// Preserve the corrupted ledger untouched for forensic audit.
 				return;
 			}
+			// Rebuild only from records whose hash and chain were verified.
+			indexOmegaStateUnlocked(
+				json.value(QStringLiteral("event_type")).toString(),
+				json.value(QStringLiteral("actor")).toString(),
+				json.value(QStringLiteral("trace_id")).toString(),
+				json.value(QStringLiteral("payload")).toObject(),
+				static_cast<int64>(json.value(QStringLiteral("timestamp_ms")).toDouble()));
 			restoredHash = eventHash;
 			restoredSequence = sequence;
 		}
@@ -171,6 +244,12 @@ bool BehaviorLedger::recordEvent(
 	}
 	_sequence = event.sequence;
 	_lastHash = event.currentHash;
+	indexOmegaStateUnlocked(
+		EventTypeToString(event.type),
+		event.actor,
+		event.traceId,
+		event.payload,
+		event.timestampMs);
 	return true;
 }
 
@@ -187,6 +266,41 @@ QString BehaviorLedger::lastHash() const {
 int64 BehaviorLedger::totalEvents() const {
 	QMutexLocker locker(&_mutex);
 	return _sequence;
+}
+
+std::optional<OmegaStateEvidence> BehaviorLedger::latestOmegaState(
+	const QString &accountScope) const {
+	QMutexLocker locker(&_mutex);
+	if (!_initialized) return std::nullopt;
+	const auto it = _omegaHistory.constFind(accountScope);
+	if (it == _omegaHistory.cend() || it.value().isEmpty()) {
+		return std::nullopt;
+	}
+	return it.value().constLast();
+}
+
+bool BehaviorLedger::verifyOmegaStatePair(
+	const QString &accountScope,
+	const QString &previousTrace,
+	const QJsonObject &previousState,
+	const QString &currentTrace,
+	const QJsonObject &currentState) const {
+	QMutexLocker locker(&_mutex);
+	if (!_initialized || accountScope.isEmpty() || previousTrace.isEmpty()
+		|| currentTrace.isEmpty() || previousTrace == currentTrace) {
+		return false;
+	}
+	const auto it = _omegaHistory.constFind(accountScope);
+	if (it == _omegaHistory.cend() || it.value().size() != 2) {
+		return false;
+	}
+	const auto &before = it.value().at(0);
+	const auto &after = it.value().at(1);
+	return before.traceId == previousTrace
+		&& after.traceId == currentTrace
+		&& before.state == previousState
+		&& after.state == currentState
+		&& before.timestampMs < after.timestampMs;
 }
 
 void BehaviorLedger::flush() {

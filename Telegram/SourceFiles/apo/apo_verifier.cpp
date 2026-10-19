@@ -91,6 +91,25 @@ VerificationResult ApoVerifier::verifyAction(
 		res.rationale = QStringLiteral("UNKNOWN: INVALID_APO_PREVIOUS_STATE");
 		return res;
 	}
+	// A nonempty provenance string is not proof. Both states must be
+	// consecutive, account-scoped observations restored from the verified
+	// durable ledger. The native dialogs vector cannot authorize other domains.
+	const auto accountScope =
+		parameters.value(QStringLiteral("apo_account_scope")).toString();
+	const auto currentTrace =
+		parameters.value(QStringLiteral("apo_current_state_source")).toString();
+	if (actionType != QStringLiteral("dialogs.inspect_server")
+		|| parameters.value(QStringLiteral("apo_state_domain")).toString()
+			!= actionType) {
+		res.rationale = QStringLiteral("UNKNOWN: APO_STATE_DOMAIN_UNSUPPORTED");
+		return res;
+	}
+	if (!BehaviorLedger::Instance().verifyOmegaStatePair(
+		accountScope, provenance.toString(), state,
+		currentTrace, candidateState.toJson())) {
+		res.rationale = QStringLiteral("UNKNOWN: APO_STATE_LEDGER_PAIR_UNVERIFIED");
+		return res;
+	}
 	res.omega = evaluateOmega(s0, candidateState);
 
 	if (!res.omega.converged) {

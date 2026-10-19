@@ -66,6 +66,12 @@ void ActionExecutor::submitAction(
 	if (!sourceTraceId.isEmpty()) {
 		plannedPayload[QStringLiteral("source_trace_id")] = sourceTraceId;
 	}
+	plannedPayload[QStringLiteral("previous_state_source")] =
+		parameters.value(QStringLiteral("apo_previous_state_source")).toString();
+	plannedPayload[QStringLiteral("current_state_source")] =
+		parameters.value(QStringLiteral("apo_current_state_source")).toString();
+	plannedPayload[QStringLiteral("account_scope")] =
+		parameters.value(QStringLiteral("apo_account_scope")).toString();
 	// Values in the gate must be inspectable, and measurement provenance
 	// must be distinguished from model assumptions.
 	plannedPayload[QStringLiteral("candidate_C")] = candidateState.C;
