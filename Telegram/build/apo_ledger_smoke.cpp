@@ -1,4 +1,5 @@
 #include "apo/apo_behavior_ledger.h"
+#include "apo/apo_executor.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QJsonObject>
@@ -9,6 +10,15 @@ int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     if (argc != 3) return 30;
     auto mode = QString::fromLocal8Bit(argv[1]);
+    if (mode == QStringLiteral("dialogs-postcondition")) {
+        if (apo::NativeDialogsPostconditionConfirmed(true, 16, 1)) return 53;
+        if (apo::NativeDialogsPostconditionConfirmed(true, 16, 15)) return 54;
+        if (apo::NativeDialogsPostconditionConfirmed(false, 16, 16)) return 55;
+        if (apo::NativeDialogsPostconditionConfirmed(true, 0, 0)) return 56;
+        if (apo::NativeDialogsPostconditionConfirmed(true, 16, 17)) return 57;
+        if (!apo::NativeDialogsPostconditionConfirmed(true, 16, 16)) return 58;
+        return 0;
+    }
     auto path = QString::fromLocal8Bit(argv[2]);
     auto &ledger = apo::BehaviorLedger::Instance();
     ledger.init(path);

@@ -55,4 +55,7 @@ foreach ($case in @(
     if ($LASTEXITCODE -ne 0) { throw "Omega state evidence $($case.Mode) failed: $LASTEXITCODE" }
     Write-Output "[PASS] $($case.Mode)"
 }
-Write-Output '[PASS] native ledger smoke 7/7'
+& $exe 'dialogs-postcondition' $ledger
+if ($LASTEXITCODE -ne 0) { throw "Native dialog postcondition guard failed: $LASTEXITCODE" }
+Write-Output '[PASS] dialogs postcondition requires complete server-to-native matching'
+Write-Output '[PASS] native ledger smoke 8/8'

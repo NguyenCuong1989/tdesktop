@@ -381,8 +381,8 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 			};
 			result.match([](const MTPDmessages_dialogsNotModified &) {
 			}, inspect, inspect);
-			const auto stateConfirmed = mainList && mainList->loaded()
-				&& serverDialogs > 0 && matchedLocalDialogs > 0;
+			const auto stateConfirmed = NativeDialogsPostconditionConfirmed(
+				mainList && mainList->loaded(), serverDialogs, matchedLocalDialogs);
 			QJsonObject observed;
 			observed[QStringLiteral("action_id")] = action.actionId;
 			observed[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);

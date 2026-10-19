@@ -36,6 +36,14 @@ enum class ActionPhase {
 	Reconciling
 };
 
+// Close a read-only inspection only if every decoded server dialog
+// is present in the loaded projection for the same authenticated session.
+[[nodiscard]] constexpr bool NativeDialogsPostconditionConfirmed(
+    bool projectionLoaded, int serverDialogs, int matchedLocalDialogs) {
+    return projectionLoaded && serverDialogs > 0
+        && matchedLocalDialogs == serverDialogs;
+}
+
 [[nodiscard]] inline QString ActionPhaseToString(ActionPhase phase) {
 	switch (phase) {
 	case ActionPhase::Observed: return QStringLiteral("OBSERVED");
