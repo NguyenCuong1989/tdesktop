@@ -64,6 +64,10 @@ void CognitiveLoop::stop() {
 	_running = false;
 	_lastRankingAccount = 0;
 	_lastRemoteInspectionAccount = 0;
+	_lastRemoteInspectionAtMs = 0;
+	_lastRemoteInspectionSucceeded = false;
+	_remoteInspectionInFlight = false;
+	++_remoteInspectionGeneration; // Invalidate callbacks from a stopped loop.
 	_lastRankingEvidence.clear();
 	if (_loopTimer) {
 		_loopTimer->stop();
@@ -199,12 +203,42 @@ void CognitiveLoop::step() {
 			_lastRankingEvidence = snapshot;
 		}
 	}
-	// One bounded, read-only Telegram server inspection per active account
-	// and process. This is a real MTProto operation via ActionExecutor,
-	// never a fabricated response or an unrestricted message send.
+	// Bounded native read-only inspection can refresh and recover from a
+	// rejected request, timeout or failed postcondition. Never send an
+	// unrestricted message or treat a dispatch as observed success.
+	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
+	if (_lastRemoteInspectionAccount != self.userId) {
+		++_remoteInspectionGeneration; // Invalidate prior account callbacks.
+		_lastRemoteInspectionAccount = self.userId;
+		_lastRemoteInspectionAtMs = 0;
+		_remoteInspectionInFlight = false;
+		_lastRemoteInspectionSucceeded = false;
+	}
+	constexpr auto kRetryAfterFailureMs = int64(60) * 1000;
+	constexpr auto kRefreshAfterSuccessMs = int64(15) * 60 * 1000;
+	constexpr auto kInFlightExpiryMs = int64(2) * 60 * 1000;
+	const auto elapsedMs = _lastRemoteInspectionAtMs > 0
+		? nowMs - _lastRemoteInspectionAtMs : int64(0);
+	if (_remoteInspectionInFlight && elapsedMs >= kInFlightExpiryMs) {
+		QJsonObject unknown;
+		unknown[QStringLiteral("kind")] = QStringLiteral("REMOTE_INSPECTION_TIMEOUT");
+		unknown[QStringLiteral("result")] = QStringLiteral("UNKNOWN_OUTCOME");
+		unknown[QStringLiteral("elapsed_ms")] = static_cast<qint64>(elapsedMs);
+		if (!RecordBehavior(EventType::Computation, traceId,
+			QStringLiteral("apo.cognitive.remote_inspection"), unknown)) {
+			return; // No fresh dispatch without durable timeout evidence.
+		}
+		_remoteInspectionInFlight = false;
+		_lastRemoteInspectionSucceeded = false;
+		++_remoteInspectionGeneration;
+	}
+	const auto revisitMs = _lastRemoteInspectionSucceeded
+		? kRefreshAfterSuccessMs : kRetryAfterFailureMs;
+	const auto inspectionDue = !_remoteInspectionInFlight
+		&& (_lastRemoteInspectionAtMs == 0
+			|| (elapsedMs >= 0 && elapsedMs >= revisitMs));
 	if (rankingPersisted && list->loaded() && limit > 0 && knownRows > 0
-		&& !ranked.empty() && limit == int(rows.size())
-		&& _lastRemoteInspectionAccount != self.userId) {
+		&& !ranked.empty() && limit == int(rows.size()) && inspectionDue) {
 		// E is directly measured state coverage. C is an explicit one-query
 		// fraction of the bounded 512-row inspection budget, an ESTIMATE.
 		// R/B retain the sealed baseline priors, NOT account measurements.
@@ -225,17 +259,34 @@ void CognitiveLoop::step() {
 			QStringLiteral("C:bounded_query_budget_ESTIMATE;"
 				"E:measured_native_known_row_fraction;"
 				"R_B:sealed_baseline_PRIORS_NOT_MEASURED");
-		_lastRemoteInspectionAccount = self.userId;
+		_lastRemoteInspectionAtMs = nowMs;
+		_lastRemoteInspectionSucceeded = false;
+		_remoteInspectionInFlight = true;
+		const auto attemptGeneration = ++_remoteInspectionGeneration;
+		const auto accountUserId = self.userId;
 		ActionExecutor::Instance().submitAction(
 			QStringLiteral("dialogs.inspect_server"),
 			QStringLiteral("native_main_dialogs"),
 			params,
 			QStringLiteral("Verify local unread context against native Telegram server"),
 			candidate,
-			[](bool success) {
-				// No economy or trust reward is issued just for RPC success.
-				// A read-only success is not evidence of customer value.
-				(void)success;
+			[this, accountUserId, attemptGeneration, traceId](bool success) {
+				// Late callbacks from a previous account/attempt are not evidence
+				// for the current one. A failed callback is NOT a verified RPC failure.
+				if (!_running || _lastRemoteInspectionAccount != accountUserId
+					|| _remoteInspectionGeneration != attemptGeneration) {
+					return;
+				}
+				_remoteInspectionInFlight = false;
+				_lastRemoteInspectionSucceeded = success;
+				QJsonObject result;
+				result[QStringLiteral("kind")] = QStringLiteral("NATIVE_INSPECTION_CALLBACK");
+				result[QStringLiteral("verified")] = success;
+				result[QStringLiteral("result")] = success
+					? QStringLiteral("VERIFIED_LOCAL_POSTCONDITION")
+					: QStringLiteral("NOT_VERIFIED");
+				RecordBehavior(EventType::Computation, traceId,
+					QStringLiteral("apo.cognitive.remote_inspection"), result);
 			});
 	}
 }

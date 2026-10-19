@@ -63,6 +63,7 @@ struct PendingAction {
 	QString target;
 	QJsonObject parameters;
 	QString rationale;
+	int64 initiatingAccountUserId = 0; // Native account binding; never logged.
 	ActionPhase phase = ActionPhase::Planned;
 	int64 proposedTimeMs = 0;
 	std::function<void(bool approved)> callback;

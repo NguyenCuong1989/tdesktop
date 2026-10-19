@@ -38,6 +38,10 @@ private:
 	int64 _cycleCount = 0;
 	int64 _lastRankingAccount = 0;
 	int64 _lastRemoteInspectionAccount = 0;
+	int64 _lastRemoteInspectionAtMs = 0;
+	int64 _remoteInspectionGeneration = 0;
+	bool _remoteInspectionInFlight = false;
+	bool _lastRemoteInspectionSucceeded = false;
 	QByteArray _lastRankingEvidence;
 };
 

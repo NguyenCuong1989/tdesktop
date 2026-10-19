@@ -15,6 +15,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "dialogs/dialogs_main_list.h"
 #include "history/history.h"
+#include "window/window_controller.h"
+#include "ui/boxes/confirm_box.h"
 #include <QtCore/QUuid>
 #include <memory>
 
@@ -44,6 +46,11 @@ void ActionExecutor::submitAction(
 	action.phase = ActionPhase::Planned;
 	action.proposedTimeMs = nowMs;
 	action.callback = onComplete;
+	if (Core::App().someSessionExists()) {
+		if (const auto session = Core::App().activeAccount().maybeSession()) {
+			action.initiatingAccountUserId = session->userId().bare;
+		}
+	}
 
 	// Phase 1: PLANNED - Log decision in Behavior Ledger
 	QJsonObject plannedPayload;
@@ -102,6 +109,20 @@ void ActionExecutor::submitAction(
 		return;
 	}
 
+	// A listed policy is not an implemented native capability. Fail closed
+	// before prompting the Creator for an action without a real dispatcher.
+	if (actionType != u"dialogs.inspect_server"_q) {
+		QJsonObject unsupported;
+		unsupported[QStringLiteral("action_id")] = actionId;
+		unsupported[QStringLiteral("action_type")] = actionType;
+		unsupported[QStringLiteral("result")] = QStringLiteral("BLOCKED_NO_NATIVE_DISPATCH");
+		unsupported[QStringLiteral("new_phase")] = QStringLiteral("BLOCKED");
+		RecordBehavior(EventType::Execution, actionId,
+			QStringLiteral("apo.executor.capability"), unsupported);
+		if (onComplete) onComplete(false);
+		return;
+	}
+
 	// Re-check authority after verification; a policy may change at any time.
 	const auto authority = AuthorityManager::Instance().getActionAuthority(actionType);
 
@@ -144,8 +165,43 @@ void ActionExecutor::submitAction(
 			return;
 		}
 
-		QMutexLocker locker(&_mutex);
-		_pendingActions[actionId] = action;
+		// The Creator approval must be visible in the same authenticated
+		// Telegram account. An unpresentable prompt is not approval.
+		const auto window = Core::App().activeWindow();
+		const auto windowSession = window ? window->maybeSession() : nullptr;
+		if (!windowSession || !action.initiatingAccountUserId
+			|| windowSession->userId().bare != action.initiatingAccountUserId) {
+			QJsonObject unavailable;
+			unavailable[QStringLiteral("action_id")] = actionId;
+			unavailable[QStringLiteral("result")] = QStringLiteral("BLOCKED_NO_NATIVE_APPROVAL_UI");
+			unavailable[QStringLiteral("new_phase")] = QStringLiteral("BLOCKED");
+			RecordBehavior(EventType::ApoVerify, actionId,
+				QStringLiteral("apo.authority.ui"), unavailable);
+			if (onComplete) onComplete(false);
+			return;
+		}
+		action.phase = ActionPhase::PendingAuthority;
+		{
+			QMutexLocker locker(&_mutex);
+			_pendingActions[actionId] = action;
+		}
+		const auto displayTarget = target.isEmpty()
+			? QStringLiteral("(not specified)") : target.left(120);
+		const auto message = QStringLiteral(
+			"Ω-Telegram requires Creator approval.\n\nAction: %1\nTarget: %2")
+			.arg(actionType, displayTarget);
+		window->show(Ui::MakeConfirmBox({
+			.text = message,
+			.confirmed = [actionId] {
+				ActionExecutor::Instance().approveAction(actionId);
+			},
+			.cancelled = [actionId] {
+				ActionExecutor::Instance().rejectAction(
+					actionId, QStringLiteral("CREATOR_DECLINED"));
+			},
+			.confirmText = QStringLiteral("Approve"),
+			.cancelText = QStringLiteral("Reject"),
+		}));
 	} else {
 		verifyPayload[QStringLiteral("result")] = QStringLiteral("DENIED_BY_POLICY");
 		verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Denied);
@@ -170,6 +226,17 @@ void ActionExecutor::approveAction(const QString &actionId) {
 
 	QJsonObject verifyPayload;
 	verifyPayload[QStringLiteral("action_id")] = actionId;
+	const auto currentSession = Core::App().someSessionExists()
+		? Core::App().activeAccount().maybeSession() : nullptr;
+	if (!currentSession || !action.initiatingAccountUserId
+		|| currentSession->userId().bare != action.initiatingAccountUserId) {
+		verifyPayload[QStringLiteral("result")] = QStringLiteral("APPROVAL_REJECTED_ACCOUNT_CHANGED");
+		verifyPayload[QStringLiteral("new_phase")] = QStringLiteral("REJECTED");
+		RecordBehavior(EventType::ApoVerify, actionId,
+			QStringLiteral("apo.authority.ui"), verifyPayload);
+		if (action.callback) action.callback(false);
+		return;
+	}
 	// Authorization may have changed while this action awaited approval.
 	const auto currentAuthority = AuthorityManager::Instance().getActionAuthority(action.actionType);
 	if (currentAuthority != AuthorityLevel::RequireApproval
