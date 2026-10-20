@@ -69,6 +69,10 @@ void CognitiveLoop::stop() {
 	_lastRemoteInspectionAtMs = 0;
 	_lastRemoteInspectionSucceeded = false;
 	_remoteInspectionInFlight = false;
+	_lastRemoteInspectionActionId.clear();
+	_lastRemoteInspectionSourceTrace.clear();
+	_lastRemoteInspectionAccountScope.clear();
+	_lastRecoveryAccountScope.clear();
 	++_remoteInspectionGeneration; // Invalidate callbacks from a stopped loop.
 	_lastRankingEvidence.clear();
 	if (_loopTimer) {
@@ -215,6 +219,9 @@ void CognitiveLoop::step() {
 		_lastRemoteInspectionAtMs = 0;
 		_remoteInspectionInFlight = false;
 		_lastRemoteInspectionSucceeded = false;
+		_lastRemoteInspectionActionId.clear();
+		_lastRemoteInspectionSourceTrace.clear();
+		_lastRemoteInspectionAccountScope.clear();
 	}
 	constexpr auto kRetryAfterFailureMs = int64(60) * 1000;
 	constexpr auto kRefreshAfterSuccessMs = int64(15) * 60 * 1000;
@@ -226,12 +233,21 @@ void CognitiveLoop::step() {
 		unknown[QStringLiteral("kind")] = QStringLiteral("REMOTE_INSPECTION_TIMEOUT");
 		unknown[QStringLiteral("result")] = QStringLiteral("UNKNOWN_OUTCOME");
 		unknown[QStringLiteral("elapsed_ms")] = static_cast<qint64>(elapsedMs);
-		if (!RecordBehavior(EventType::Computation, traceId,
-			QStringLiteral("apo.cognitive.remote_inspection"), unknown)) {
+		unknown[QStringLiteral("action_id")] = _lastRemoteInspectionActionId;
+		unknown[QStringLiteral("source_trace_id")] = _lastRemoteInspectionSourceTrace;
+		unknown[QStringLiteral("account_scope")] = _lastRemoteInspectionAccountScope;
+		unknown[QStringLiteral("new_phase")] = QStringLiteral("UNKNOWN_OUTCOME");
+		if (!RecordBehavior(EventType::Computation,
+			_lastRemoteInspectionActionId.isEmpty() ? traceId : _lastRemoteInspectionActionId,
+			QStringLiteral("apo.cognitive.remote_inspection"), unknown,
+			_lastRemoteInspectionSourceTrace)) {
 			return; // No fresh dispatch without durable timeout evidence.
 		}
 		_remoteInspectionInFlight = false;
 		_lastRemoteInspectionSucceeded = false;
+		_lastRemoteInspectionActionId.clear();
+		_lastRemoteInspectionSourceTrace.clear();
+		_lastRemoteInspectionAccountScope.clear();
 		++_remoteInspectionGeneration;
 	}
 	const auto revisitMs = _lastRemoteInspectionSucceeded
@@ -250,6 +266,28 @@ void CognitiveLoop::step() {
 		(QString::number(self.userId) + QStringLiteral("|")
 			+ cWorkingDir()).toUtf8(),
 		QCryptographicHash::Sha256).toHex());
+	// Restore unresolved native dispatches from the already verified RAW chain.
+	// These are recovery observations, NOT inferred RPC failures or successes.
+	if (_lastRecoveryAccountScope != accountScope) {
+		const auto unresolved = BehaviorLedger::Instance().unresolvedNativeReads(accountScope);
+		for (const auto &pending : unresolved) {
+			QJsonObject recovery;
+			recovery[QStringLiteral("kind")] = QStringLiteral("NATIVE_READ_RECOVERY_PENDING");
+			recovery[QStringLiteral("action_id")] = pending.actionId;
+			recovery[QStringLiteral("account_scope")] = accountScope;
+			recovery[QStringLiteral("source_trace_id")] = pending.sourceTraceId;
+			recovery[QStringLiteral("request_id")] = pending.requestId;
+			recovery[QStringLiteral("previous_phase")] = pending.phase;
+			recovery[QStringLiteral("result")] = QStringLiteral("OUTCOME_UNRESOLVED");
+			recovery[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
+			if (!RecordBehavior(EventType::Computation, pending.actionId,
+				QStringLiteral("apo.cognitive.recovery"), recovery,
+				pending.sourceTraceId)) {
+				return; // Unverifiable recovery cannot authorize a new transition.
+			}
+		}
+		_lastRecoveryAccountScope = accountScope;
+	}
 	const auto measurementComplete = list->loaded() && limit > 0
 		&& knownRows > 0 && limit == int(rows.size());
 	const auto previous = measurementComplete
@@ -320,32 +358,57 @@ void CognitiveLoop::step() {
 		_lastRemoteInspectionAtMs = nowMs;
 		_lastRemoteInspectionSucceeded = false;
 		_remoteInspectionInFlight = true;
+		_lastRemoteInspectionSourceTrace = traceId;
+		_lastRemoteInspectionAccountScope = accountScope;
+		_lastRemoteInspectionActionId.clear();
 		const auto attemptGeneration = ++_remoteInspectionGeneration;
 		const auto accountUserId = self.userId;
+		const auto attemptActionId = std::make_shared<QString>();
 		ActionExecutor::Instance().submitAction(
 			QStringLiteral("dialogs.inspect_server"),
 			QStringLiteral("native_main_dialogs"),
 			params,
 			QStringLiteral("Verify local unread context against native Telegram server"),
 			candidate,
-			[this, accountUserId, attemptGeneration, traceId](bool success) {
-				// Late callbacks from a previous account/attempt are not evidence
-				// for the current one. A failed callback is NOT a verified RPC failure.
+			[this, accountUserId, accountScope, attemptGeneration, traceId, attemptActionId](bool success) {
+				// Never promote an obsolete attempt to success for the current account/cycle.
+				// Still preserve the arrival as a correlated, non-terminal observation.
 				if (!_running || _lastRemoteInspectionAccount != accountUserId
 					|| _remoteInspectionGeneration != attemptGeneration) {
+					QJsonObject late;
+					late[QStringLiteral("action_id")] = *attemptActionId;
+					late[QStringLiteral("source_trace_id")] = traceId;
+					late[QStringLiteral("account_scope")] = accountScope;
+					late[QStringLiteral("result")] = QStringLiteral("LATE_CALLBACK_IGNORED");
+					late[QStringLiteral("verified")] = success;
+					late[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
+					RecordBehavior(EventType::ObservedResult,
+						attemptActionId->isEmpty() ? traceId : *attemptActionId,
+						QStringLiteral("apo.cognitive.remote_inspection"), late, traceId);
 					return;
 				}
 				_remoteInspectionInFlight = false;
 				_lastRemoteInspectionSucceeded = success;
 				QJsonObject result;
 				result[QStringLiteral("kind")] = QStringLiteral("NATIVE_INSPECTION_CALLBACK");
+				result[QStringLiteral("action_id")] = *attemptActionId;
+				result[QStringLiteral("source_trace_id")] = traceId;
+				result[QStringLiteral("account_scope")] = accountScope;
 				result[QStringLiteral("verified")] = success;
 				result[QStringLiteral("result")] = success
 					? QStringLiteral("VERIFIED_LOCAL_POSTCONDITION")
 					: QStringLiteral("NOT_VERIFIED");
-				RecordBehavior(EventType::Computation, traceId,
-					QStringLiteral("apo.cognitive.remote_inspection"), result);
-			});
+				RecordBehavior(EventType::Computation,
+					attemptActionId->isEmpty() ? traceId : *attemptActionId,
+					QStringLiteral("apo.cognitive.remote_inspection"), result, traceId);
+				_lastRemoteInspectionActionId.clear();
+				_lastRemoteInspectionSourceTrace.clear();
+				_lastRemoteInspectionAccountScope.clear();
+			},
+			attemptActionId.get());
+		if (_remoteInspectionInFlight && _remoteInspectionGeneration == attemptGeneration) {
+			_lastRemoteInspectionActionId = *attemptActionId;
+		}
 	}
 }
 

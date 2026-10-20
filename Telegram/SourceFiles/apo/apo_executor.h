@@ -88,7 +88,8 @@ public:
 		const QJsonObject &parameters,
 		const QString &rationale,
 		const ApoStateQuad &candidateState,
-		std::function<void(bool success)> onComplete);
+		std::function<void(bool success)> onComplete,
+		QString *submittedActionId = nullptr);
 
 	// User approved a pending action via UI
 	void approveAction(const QString &actionId);

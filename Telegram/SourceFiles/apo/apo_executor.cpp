@@ -33,8 +33,12 @@ void ActionExecutor::submitAction(
 	const QJsonObject &parameters,
 	const QString &rationale,
 	const ApoStateQuad &candidateState,
-	std::function<void(bool success)> onComplete) {
+	std::function<void(bool success)> onComplete,
+	QString *submittedActionId) {
 	const auto actionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+	if (submittedActionId) {
+		*submittedActionId = actionId;
+	}
 	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
 
 	PendingAction action;
@@ -367,7 +371,7 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 						if (!mainList) return;
 						const auto peer = peerFromMTP(dialog.vpeer());
 						if (!peer) return;
-						for (const auto row : mainList->indexed()->all()) {
+						for (const auto &row : mainList->indexed()->all()) {
 							const auto history = row->history();
 							if (history && history->peer->id == peer) {
 								++matchedLocalDialogs;

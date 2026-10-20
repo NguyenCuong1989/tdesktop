@@ -58,4 +58,11 @@ foreach ($case in @(
 & $exe 'dialogs-postcondition' $ledger
 if ($LASTEXITCODE -ne 0) { throw "Native dialog postcondition guard failed: $LASTEXITCODE" }
 Write-Output '[PASS] dialogs postcondition requires complete server-to-native matching'
-Write-Output '[PASS] native ledger smoke 8/8'
+$recoveryLedger = Join-Path $out 'omega-recovery-valid.jsonl'
+Remove-Item -LiteralPath $recoveryLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('recovery-write', 'recovery-reopen', 'recovery-closed')) {
+    & $exe $mode $recoveryLedger
+    if ($LASTEXITCODE -ne 0) { throw "Native recovery ledger $mode failed: $LASTEXITCODE" }
+    Write-Output "[PASS] $mode"
+}
+Write-Output '[PASS] native ledger smoke 9/9'

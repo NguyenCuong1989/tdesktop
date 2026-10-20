@@ -52,6 +52,74 @@ int main(int argc, char **argv) {
     // Two independent observations must survive a process restart and
     // cannot be replaced by baseline priors, a different account or order.
     const auto scope = QStringLiteral("test-account-scope");
+    if (mode == QStringLiteral("recovery-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 61;
+        QJsonObject planned;
+        planned[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        planned[QStringLiteral("action_type")] = QStringLiteral("dialogs.inspect_server");
+        planned[QStringLiteral("account_scope")] = scope;
+        planned[QStringLiteral("source_trace_id")] = QStringLiteral("observed-cycle");
+        planned[QStringLiteral("phase")] = QStringLiteral("PLANNED");
+        if (!ledger.recordEvent(apo::EventType::Decision, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.agent_core"), planned)) return 62;
+        QJsonObject dispatched;
+        dispatched[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        dispatched[QStringLiteral("request_id")] = 583;
+        dispatched[QStringLiteral("new_phase")] = QStringLiteral("DISPATCHED");
+        if (!ledger.recordEvent(apo::EventType::Execution, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.executor.native"), dispatched)) return 63;
+        QJsonObject unknown;
+        unknown[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        unknown[QStringLiteral("account_scope")] = scope;
+        unknown[QStringLiteral("new_phase")] = QStringLiteral("UNKNOWN_OUTCOME");
+        unknown[QStringLiteral("result")] = QStringLiteral("UNKNOWN_OUTCOME");
+        if (!ledger.recordEvent(apo::EventType::Computation, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.cognitive.remote_inspection"), unknown)) return 64;
+        const auto open = ledger.unresolvedNativeReads(scope);
+        return open.size() == 1 && open[0].requestId == QStringLiteral("583")
+            && open[0].phase == QStringLiteral("UNKNOWN_OUTCOME") ? 0 : 65;
+    }
+    if (mode == QStringLiteral("recovery-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 3) return 66;
+        const auto open = ledger.unresolvedNativeReads(scope);
+        if (open.size() != 1 || open[0].actionId != QStringLiteral("read-action-1")
+            || open[0].requestId != QStringLiteral("583")
+            || open[0].phase != QStringLiteral("UNKNOWN_OUTCOME")
+            || !ledger.unresolvedNativeReads(QStringLiteral("other-account")).isEmpty()) return 67;
+        QJsonObject late;
+        late[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        late[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
+        late[QStringLiteral("result")] = QStringLiteral("LATE_CALLBACK_IGNORED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.cognitive.remote_inspection"), late)) return 68;
+        if (ledger.unresolvedNativeReads(scope).size() != 1) return 69;
+        QJsonObject closed;
+        closed[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_READ_ONLY");
+        if (!ledger.recordEvent(apo::EventType::StateReduce, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.executor.native"), closed)) return 74;
+        if (ledger.unresolvedNativeReads(scope).size() != 1) return 75;
+        QJsonObject confirmed;
+        confirmed[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        confirmed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
+        confirmed[QStringLiteral("result")] = QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.executor.native"), confirmed)) return 76;
+        if (ledger.unresolvedNativeReads(scope).size() != 1) return 77;
+        closed = QJsonObject();
+        closed[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_READ_ONLY");
+        if (!ledger.recordEvent(apo::EventType::StateReduce, QStringLiteral("read-action-1"),
+            QStringLiteral("apo.executor.native"), closed)) return 70;
+        return ledger.unresolvedNativeReads(scope).isEmpty() ? 0 : 71;
+    }
+    if (mode == QStringLiteral("recovery-closed")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 7) return 72;
+        return ledger.unresolvedNativeReads(scope).isEmpty() ? 0 : 73;
+    }
+
     QJsonObject state;
     state[QStringLiteral("C")] = 247.0 / 512.0;
     state[QStringLiteral("R")] = 1.0 / 247.0;

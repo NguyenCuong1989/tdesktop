@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QDir>
 #include <QtCore/QTextStream>
 #include <cmath>
+#include <algorithm>
 
 namespace apo {
 
@@ -23,6 +24,67 @@ BehaviorLedger::BehaviorLedger()
 
 BehaviorLedger::~BehaviorLedger() {
 	flush();
+}
+
+void BehaviorLedger::indexNativeReadUnlocked(
+    const QString &actor,
+    const QString &traceId,
+    const QJsonObject &payload,
+    int64 timestampMs) {
+    const auto actionId = payload.value(QStringLiteral("action_id")).toString();
+    if (actionId.isEmpty()) return;
+    const auto declared = payload.value(QStringLiteral("phase")).toString();
+    const auto transition = payload.value(QStringLiteral("new_phase")).toString();
+    const auto phase = transition.isEmpty() ? declared : transition;
+    if (actor == QStringLiteral("apo.agent_core")
+        && phase == QStringLiteral("PLANNED")
+        && payload.value(QStringLiteral("action_type")).toString()
+            == QStringLiteral("dialogs.inspect_server")) {
+        const auto scope = payload.value(QStringLiteral("account_scope")).toString();
+        if (scope.isEmpty()) return;
+        _nativeReadRecovery.insert(actionId, {
+            actionId, scope,
+            payload.value(QStringLiteral("source_trace_id")).toString(),
+            QString(), phase, timestampMs
+        });
+        return;
+    }
+    auto it = _nativeReadRecovery.find(actionId);
+    if (it == _nativeReadRecovery.end()) return;
+    // A terminal success without a preceding observed native postcondition
+    // is not evidence and must remain unresolved across restarts.
+    if (phase == QStringLiteral("STATE_CONFIRMED")
+        && actor == QStringLiteral("apo.executor.native")
+        && payload.value(QStringLiteral("result")).toString()
+            == QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED")) {
+        it->postconditionVerified = true;
+    }
+    if (phase == QStringLiteral("CLOSED")) {
+        if (actor == QStringLiteral("apo.executor.native")
+            && it->postconditionVerified
+            && payload.value(QStringLiteral("result")).toString()
+                == QStringLiteral("SUCCESS_READ_ONLY")) {
+            _nativeReadRecovery.erase(it);
+        } else {
+            it->phase = QStringLiteral("CLOSED_WITHOUT_POSTCONDITION_EVIDENCE");
+            it->timestampMs = timestampMs;
+        }
+        return;
+    }
+    if (phase == QStringLiteral("FAILED")
+        || phase == QStringLiteral("REJECTED")
+        || phase == QStringLiteral("BLOCKED")
+        || phase == QStringLiteral("DENIED")) {
+        _nativeReadRecovery.erase(it);
+        return;
+    }
+    if (phase.isEmpty()) return;
+    const auto req = payload.value(QStringLiteral("request_id"));
+    if (req.isDouble() && req.toDouble() > 0) {
+        it->requestId = QString::number(static_cast<int64>(req.toDouble()));
+    }
+    it->phase = phase;
+    it->timestampMs = timestampMs;
 }
 
 void BehaviorLedger::indexOmegaStateUnlocked(
@@ -100,6 +162,7 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 		return;
 	}
 	_omegaHistory.clear();
+	_nativeReadRecovery.clear();
 
 	if (storagePath.isEmpty()) {
 		const auto appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -166,6 +229,11 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 				return;
 			}
 			// Rebuild only from records whose hash and chain were verified.
+			indexNativeReadUnlocked(
+				json.value(QStringLiteral("actor")).toString(),
+				json.value(QStringLiteral("trace_id")).toString(),
+				json.value(QStringLiteral("payload")).toObject(),
+				static_cast<int64>(json.value(QStringLiteral("timestamp_ms")).toDouble()));
 			indexOmegaStateUnlocked(
 				json.value(QStringLiteral("event_type")).toString(),
 				json.value(QStringLiteral("actor")).toString(),
@@ -244,6 +312,7 @@ bool BehaviorLedger::recordEvent(
 	}
 	_sequence = event.sequence;
 	_lastHash = event.currentHash;
+	indexNativeReadUnlocked(event.actor, event.traceId, event.payload, event.timestampMs);
 	indexOmegaStateUnlocked(
 		EventTypeToString(event.type),
 		event.actor,
@@ -266,6 +335,21 @@ QString BehaviorLedger::lastHash() const {
 int64 BehaviorLedger::totalEvents() const {
 	QMutexLocker locker(&_mutex);
 	return _sequence;
+}
+
+QVector<NativeReadRecoveryEvidence> BehaviorLedger::unresolvedNativeReads(
+    const QString &accountScope) const {
+    QMutexLocker locker(&_mutex);
+    QVector<NativeReadRecoveryEvidence> result;
+    if (!_initialized || accountScope.isEmpty()) return result;
+    for (auto it = _nativeReadRecovery.cbegin(); it != _nativeReadRecovery.cend(); ++it) {
+        if (it.value().accountScope == accountScope) result.push_back(it.value());
+    }
+    std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+        if (a.timestampMs != b.timestampMs) return a.timestampMs < b.timestampMs;
+        return a.actionId < b.actionId;
+    });
+    return result;
 }
 
 std::optional<OmegaStateEvidence> BehaviorLedger::latestOmegaState(

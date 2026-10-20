@@ -17,6 +17,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace apo {
 
+// A hash-chain-verified native read with no evidenced terminal outcome.
+struct NativeReadRecoveryEvidence {
+    QString actionId;
+    QString accountScope;
+    QString sourceTraceId;
+    QString requestId;
+    QString phase;
+    int64 timestampMs = 0;
+    bool postconditionVerified = false;
+};
+
 // A persisted, account-scoped observation, never a model prior.
 struct OmegaStateEvidence {
 	QString traceId;
@@ -44,6 +55,8 @@ public:
 	// Only hash-chain-verified native observations are eligible as S0/S1.
 	[[nodiscard]] std::optional<OmegaStateEvidence> latestOmegaState(
 		const QString &accountScope) const;
+	[[nodiscard]] QVector<NativeReadRecoveryEvidence> unresolvedNativeReads(
+		const QString &accountScope) const;
 	[[nodiscard]] bool verifyOmegaStatePair(
 		const QString &accountScope,
 		const QString &previousTrace,
@@ -59,6 +72,11 @@ private:
 
 	// Caller must already hold _mutex.
 	void initUnlocked(const QString &storagePath);
+	void indexNativeReadUnlocked(
+		const QString &actor,
+		const QString &traceId,
+		const QJsonObject &payload,
+		int64 timestampMs);
 	void indexOmegaStateUnlocked(
 		const QString &eventType,
 		const QString &actor,
@@ -76,6 +94,7 @@ private:
 	int64 _sequence = 0;
 	bool _initialized = false;
 	QHash<QString, QVector<OmegaStateEvidence>> _omegaHistory;
+	QHash<QString, NativeReadRecoveryEvidence> _nativeReadRecovery;
 };
 
 // Global convenience recording function

@@ -42,6 +42,10 @@ private:
 	int64 _remoteInspectionGeneration = 0;
 	bool _remoteInspectionInFlight = false;
 	bool _lastRemoteInspectionSucceeded = false;
+	QString _lastRecoveryAccountScope;
+	QString _lastRemoteInspectionActionId;
+	QString _lastRemoteInspectionSourceTrace;
+	QString _lastRemoteInspectionAccountScope;
 	QByteArray _lastRankingEvidence;
 };
 
