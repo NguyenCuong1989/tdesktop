@@ -74,4 +74,13 @@ Remove-Item -LiteralPath $nativeBodyLedger -ErrorAction SilentlyContinue
 & $exe 'native-body-bridge' $nativeBodyLedger
 if ($LASTEXITCODE -ne 0) { throw "Native StateBridge account-projection integration failed: $LASTEXITCODE" }
 Write-Output '[PASS] native body bridge persists account-scoped projection and resets on account switch'
-Write-Output '[PASS] native ledger smoke 11/11'
+$traceLedger = Join-Path $out 'omega-generated-trace-valid.jsonl'
+Remove-Item -LiteralPath $traceLedger -ErrorAction SilentlyContinue
+& $exe 'generated-trace-unique' $traceLedger
+if ($LASTEXITCODE -ne 0) { throw "Generated trace uniqueness failed: $LASTEXITCODE" }
+$traceIds = Get-Content -LiteralPath $traceLedger | ForEach-Object { ($_ | ConvertFrom-Json).trace_id }
+if ($traceIds.Count -ne 2 -or $traceIds[0] -eq $traceIds[1]) {
+    throw 'Generated trace IDs are not unique'
+}
+Write-Output '[PASS] generated trace IDs are unique across adjacent events'
+Write-Output '[PASS] native ledger smoke 12/12'

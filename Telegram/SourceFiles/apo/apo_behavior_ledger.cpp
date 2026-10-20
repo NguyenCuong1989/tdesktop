@@ -275,7 +275,9 @@ bool BehaviorLedger::recordEvent(
 
 	RawEvent event;
 	event.sequence = _sequence + 1;
-	event.traceId = traceId.isEmpty() ? QStringLiteral("trace-%1").arg(nowMs) : traceId;
+	event.traceId = traceId.isEmpty()
+		? QStringLiteral("trace-%1-%2").arg(event.sequence).arg(nowMs)
+		: traceId;
 	event.parentTraceId = parentTraceId;
 	event.type = type;
 	event.actor = actor.isEmpty() ? QStringLiteral("tdesktop.core") : actor;

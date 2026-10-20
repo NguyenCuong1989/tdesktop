@@ -139,6 +139,7 @@ jobs:
         run: |
           $ledger = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.cpp -Raw
           $executor = Get-Content Telegram/SourceFiles/apo/apo_executor.cpp -Raw
+          $verifier = Get-Content Telegram/SourceFiles/apo/apo_verifier.cpp -Raw
           $loop = Get-Content Telegram/SourceFiles/apo/apo_cognitive_loop.cpp -Raw
           $stateBridge = Get-Content Telegram/SourceFiles/apo/apo_state_bridge.cpp -Raw
           $dataSession = Get-Content Telegram/SourceFiles/data/data_session.cpp -Raw
@@ -176,6 +177,14 @@ jobs:
               $loop -match 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
               $executor -notmatch 'if \(!RecordBehavior\(EventType::ApoVerify') {
               throw 'Omega verification or durable approval gate is bypassable'
+          }
+          if ($verifier -notmatch 'QJsonDocument\(parameters\)\.toJson\(QJsonDocument::Compact\)' -or
+              $verifier -notmatch 'parameterHash' -or
+              $verifier -notmatch 'logPayload\[QStringLiteral\("parameter_hash"\)\]') {
+              throw 'Omega proof is not bound to canonical action parameters'
+          }
+          if ($ledger -notmatch 'QStringLiteral\("trace-%1-%2"\)\.arg\(event\.sequence\)\.arg\(nowMs\)') {
+              throw 'Fallback trace identifiers are not sequence-unique'
           }
           if ($body -match 'advancePhase\(action\.actionId, ActionPhase::Acknowledged\)' -or
               $body -match 'action\.callback\(true\)') {

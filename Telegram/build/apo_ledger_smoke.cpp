@@ -93,6 +93,16 @@ int main(int argc, char **argv) {
         if (ledger.totalEvents() != 3) return 99;
         return 0;
     }
+    if (mode == QStringLiteral("generated-trace-unique")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 100;
+        QJsonObject payload;
+        payload[QStringLiteral("kind")] = QStringLiteral("TRACE_UNIQUENESS_FIXTURE");
+        if (!ledger.recordEvent(apo::EventType::Computation,
+            QString(), QStringLiteral("test.ledger"), payload)) return 101;
+        if (!ledger.recordEvent(apo::EventType::Computation,
+            QString(), QStringLiteral("test.ledger"), payload)) return 102;
+        return ledger.totalEvents() == 2 ? 0 : 103;
+    }
     if (mode == QStringLiteral("write")) {
         if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 31;
         for (int i = 0; i != 3; ++i) {

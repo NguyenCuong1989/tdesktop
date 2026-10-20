@@ -126,9 +126,16 @@ VerificationResult ApoVerifier::verifyAction(
 	res.rationale = QStringLiteral("VERIFIED: Action satisfies Authority and Canonical Omega(P) convergence.");
 
 	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
-	const auto proofPayload = QStringLiteral("%1:%2:%3:%4:%5")
+	const auto canonicalParameters =
+		QJsonDocument(parameters).toJson(QJsonDocument::Compact);
+	const auto parameterHashBytes = QCryptographicHash::hash(
+		canonicalParameters,
+		QCryptographicHash::Sha256);
+	const auto parameterHash = QString::fromUtf8(parameterHashBytes.toHex());
+	const auto proofPayload = QStringLiteral("%1:%2:%3:%4:%5:%6")
 		.arg(actionType)
 		.arg(target)
+		.arg(parameterHash)
 		.arg(res.omega.deltaD)
 		.arg(res.omega.V1)
 		.arg(nowMs);
@@ -142,6 +149,7 @@ VerificationResult ApoVerifier::verifyAction(
 	QJsonObject logPayload = res.toJson();
 	logPayload[QStringLiteral("action_type")] = actionType;
 	logPayload[QStringLiteral("target_present")] = !target.isEmpty();
+	logPayload[QStringLiteral("parameter_hash")] = parameterHash;
 
 	if (!RecordBehavior(
 		EventType::ApoVerify,
