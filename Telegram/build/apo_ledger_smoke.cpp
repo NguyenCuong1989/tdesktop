@@ -11,6 +11,18 @@ int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
     if (argc != 3) return 30;
     auto mode = QString::fromLocal8Bit(argv[1]);
+    if (mode == QStringLiteral("storage-policy")) {
+        constexpr auto mebibyte = apo::int64(1024) * 1024;
+        if (!apo::LedgerStorageAllowsAppend(511 * mebibyte,
+            mebibyte, 2 * 1024 * mebibyte)) return 106;
+        if (apo::LedgerStorageAllowsAppend(512 * mebibyte,
+            1, 2 * 1024 * mebibyte)) return 107;
+        if (apo::LedgerStorageAllowsAppend(1, 1,
+            1024 * mebibyte)) return 108;
+        if (apo::LedgerStorageAllowsAppend(-1, 1,
+            2 * 1024 * mebibyte)) return 109;
+        return 0;
+    }
     if (mode == QStringLiteral("dialogs-postcondition")) {
         if (apo::NativeDialogsPostconditionConfirmed(true, 16, 1)) return 53;
         if (apo::NativeDialogsPostconditionConfirmed(true, 16, 15)) return 54;
@@ -60,6 +72,17 @@ int main(int argc, char **argv) {
     auto path = QString::fromLocal8Bit(argv[2]);
     auto &ledger = apo::BehaviorLedger::Instance();
     ledger.init(path);
+    if (mode == QStringLiteral("async-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 110;
+        for (auto i = 0; i != 256; ++i) {
+            QJsonObject payload;
+            payload[QStringLiteral("item")] = i;
+            if (!ledger.recordEventAsync(apo::EventType::UiEvent,
+                QString(), QStringLiteral("test.async-ledger"), payload)) return 111;
+        }
+        ledger.flush();
+        return ledger.totalEvents() == 256 ? 0 : 112;
+    }
     if (mode == QStringLiteral("native-body-bridge")) {
         if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 91;
         auto &bridge = apo::StateBridge::Instance();

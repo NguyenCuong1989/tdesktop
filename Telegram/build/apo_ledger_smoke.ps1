@@ -21,7 +21,7 @@ $compiler += ' "' + (Join-Path $repo 'Telegram\SourceFiles\apo\apo_behavior_ledg
 $compiler += ' "' + (Join-Path $repo 'Telegram\SourceFiles\apo\apo_state_bridge.cpp') + '"'
 $compiler += ' /Fe:"' + $exe + '"'
 $compiler += ' /link /LIBPATH:"' + (Join-Path $qt 'lib') + '"'
-$compiler += ' Qt5Cored.lib qtpcre2d.lib ws2_32.lib user32.lib advapi32.lib shell32.lib ole32.lib version.lib netapi32.lib userenv.lib winmm.lib'
+$compiler += ' Qt5Cored.lib qtpcre2d.lib ws2_32.lib user32.lib advapi32.lib shell32.lib ole32.lib version.lib netapi32.lib userenv.lib winmm.lib mpr.lib'
 $cmd = 'call "' + $vcvars + '" -vcvars_ver=14.44 >nul && ' + $compiler
 Push-Location $out
 try {
@@ -31,6 +31,14 @@ try {
   Pop-Location
 }
 Remove-Item -LiteralPath $ledger, $corrupted -ErrorAction SilentlyContinue
+& $exe 'storage-policy' $ledger
+if ($LASTEXITCODE -ne 0) { throw "Ledger storage policy failed: $LASTEXITCODE" }
+Write-Output '[PASS] ledger storage is bounded without deleting evidence'
+$asyncLedger = Join-Path $out 'async-valid.jsonl'
+Remove-Item -LiteralPath $asyncLedger -ErrorAction SilentlyContinue
+& $exe 'async-write' $asyncLedger
+if ($LASTEXITCODE -ne 0) { throw "Async ledger writer failed: $LASTEXITCODE" }
+Write-Output '[PASS] observational events drain from the bounded async queue'
 foreach ($mode in @('write', 'reopen', 'verify4')) {
   & $exe $mode $ledger
   if ($LASTEXITCODE -ne 0) { throw "Native ledger smoke $mode failed: $LASTEXITCODE" }
@@ -111,4 +119,4 @@ if ($upgraded.Count -ne 2 -or
     throw 'Ledger v1-to-v2 upgrade did not preserve the expected hash schema boundary'
 }
 Write-Output '[PASS] verified hash v1 ledger upgrades in place to metadata-bound v2 events'
-Write-Output '[PASS] native ledger smoke 13/13'
+Write-Output '[PASS] native ledger smoke 15/15'

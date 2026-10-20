@@ -138,6 +138,7 @@ jobs:
         shell: pwsh
         run: |
           $ledger = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.cpp -Raw
+          $ledgerHeader = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.h -Raw
           $executor = Get-Content Telegram/SourceFiles/apo/apo_executor.cpp -Raw
           $verifier = Get-Content Telegram/SourceFiles/apo/apo_verifier.cpp -Raw
           $loop = Get-Content Telegram/SourceFiles/apo/apo_cognitive_loop.cpp -Raw
@@ -165,6 +166,16 @@ jobs:
               $ledger -notmatch 'event\.parentTraceId' -or
               $ledger -notmatch 'event\.timestampMs') {
               throw 'Ledger hash v2 metadata binding or v1 replay compatibility missing'
+          }
+          if ($ledgerHeader -notmatch 'recordEventAsync\(' -or
+              $ledger -notmatch 'kMaxAsyncEvents' -or
+              $runtime -notmatch 'RecordBehaviorAsync\(') {
+              throw 'Bounded off-caller persistence for observational events is missing'
+          }
+          if ($ledger -notmatch 'kMaxLedgerBytes' -or
+              $ledger -notmatch 'kReservedStorageBytes' -or
+              $ledger -notmatch 'LedgerStorageAllowsAppend\(') {
+              throw 'Ledger storage quota or free-space reserve guard is missing'
           }
           if ($stateBridge -notmatch '_self\.userId != accountUserId' -or
               $dataSession -notmatch 'session\(\)\.userId\(\)\.bare' -or

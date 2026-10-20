@@ -125,7 +125,7 @@ void Runtime::onHeartbeatTick() {
 	payload[QStringLiteral("tick_time")] = static_cast<qint64>(QDateTime::currentMSecsSinceEpoch());
 	payload[QStringLiteral("total_events")] = static_cast<qint64>(BehaviorLedger::Instance().totalEvents());
 
-	RecordBehavior(
+	RecordBehaviorAsync(
 		EventType::Computation,
 		QStringLiteral("heartbeat"),
 		QStringLiteral("apo.runtime.heartbeat"),
@@ -142,7 +142,7 @@ void Runtime::onUiEvent(
 	payload[QStringLiteral("widget")] = widgetName;
 	payload[QStringLiteral("action")] = actionName;
 
-	RecordBehavior(
+	RecordBehaviorAsync(
 		EventType::UiEvent,
 		QString(),
 		widgetName,
@@ -163,7 +163,7 @@ void Runtime::onMtprotoRequest(
 		payload[QStringLiteral("request_constructor_id")] = constructor;
 	}
 
-	RecordBehavior(
+	RecordBehaviorAsync(
 		EventType::Execution,
 		QStringLiteral("mtproto-%1").arg(reqId),
 		QStringLiteral("apo.mtproto.dispatcher"),
@@ -193,7 +193,7 @@ void Runtime::onMtprotoResponse(
 		payload[QStringLiteral("error_code")] = code;
 	}
 
-	RecordBehavior(
+	RecordBehaviorAsync(
 		EventType::ObservedResult,
 		QStringLiteral("mtproto-%1").arg(reqId),
 		QStringLiteral("apo.mtproto.receiver"),
@@ -208,7 +208,7 @@ void Runtime::onServerUpdate(
 	payload[QStringLiteral("data_field_count")] = updateData.size();
 	payload[QStringLiteral("data_redacted")] = true;
 
-	RecordBehavior(
+	RecordBehaviorAsync(
 		EventType::ExternalInput,
 		QString(),
 		QStringLiteral("apo.server.update"),

@@ -12,8 +12,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QString>
 #include <QtCore/QHash>
 #include <QtCore/QVector>
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <thread>
 
 namespace apo {
 
@@ -36,12 +40,23 @@ struct OmegaStateEvidence {
 	int64 timestampMs = 0;
 };
 
+[[nodiscard]] bool LedgerStorageAllowsAppend(
+	int64 currentSize,
+	int64 appendSize,
+	int64 availableBytes);
+
 class BehaviorLedger final {
 public:
 	static BehaviorLedger &Instance();
 
 	void init(const QString &storagePath = QString());
 	bool recordEvent(
+		EventType type,
+		const QString &traceId,
+		const QString &actor,
+		const QJsonObject &payload,
+		const QString &parentTraceId = QString());
+	bool recordEventAsync(
 		EventType type,
 		const QString &traceId,
 		const QString &actor,
@@ -83,6 +98,18 @@ private:
 		const QString &traceId,
 		const QJsonObject &payload,
 		int64 timestampMs);
+	void startAsyncWriter();
+	void stopAsyncWriter();
+	void drainAsyncWriter();
+	void asyncWriterLoop();
+
+	struct PendingEvent {
+		EventType type;
+		QString traceId;
+		QString actor;
+		QJsonObject payload;
+		QString parentTraceId;
+	};
 
 	BehaviorLedger(const BehaviorLedger &) = delete;
 	BehaviorLedger &operator=(const BehaviorLedger &) = delete;
@@ -95,6 +122,13 @@ private:
 	bool _initialized = false;
 	QHash<QString, QVector<OmegaStateEvidence>> _omegaHistory;
 	QHash<QString, NativeReadRecoveryEvidence> _nativeReadRecovery;
+	std::mutex _asyncMutex;
+	std::condition_variable _asyncWake;
+	std::condition_variable _asyncDrained;
+	std::deque<PendingEvent> _asyncQueue;
+	std::thread _asyncWriter;
+	bool _asyncWriting = false;
+	bool _asyncStopping = false;
 };
 
 // Global convenience recording function
@@ -105,6 +139,16 @@ inline bool RecordBehavior(
 	const QJsonObject &payload,
 	const QString &parentTraceId = QString()) {
 	return BehaviorLedger::Instance().recordEvent(type, traceId, actor, payload, parentTraceId);
+}
+
+inline bool RecordBehaviorAsync(
+	EventType type,
+	const QString &traceId,
+	const QString &actor,
+	const QJsonObject &payload,
+	const QString &parentTraceId = QString()) {
+	return BehaviorLedger::Instance().recordEventAsync(
+		type, traceId, actor, payload, parentTraceId);
 }
 
 } // namespace apo

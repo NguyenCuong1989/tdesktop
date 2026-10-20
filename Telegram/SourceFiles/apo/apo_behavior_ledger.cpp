@@ -5,13 +5,33 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "apo/apo_behavior_ledger.h"
-#include <QtCore/QStandardPaths>
 #include <QtCore/QDir>
+#include <QtCore/QFileInfo>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QStorageInfo>
 #include <QtCore/QTextStream>
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 
 namespace apo {
+
+namespace {
+constexpr auto kMaxLedgerBytes = int64(512) * 1024 * 1024;
+constexpr auto kReservedStorageBytes = int64(1024) * 1024 * 1024;
+constexpr auto kMaxAsyncEvents = size_t(8192);
+} // namespace
+
+bool LedgerStorageAllowsAppend(
+		int64 currentSize,
+		int64 appendSize,
+		int64 availableBytes) {
+	return currentSize >= 0
+		&& appendSize > 0
+		&& availableBytes >= 0
+		&& currentSize <= kMaxLedgerBytes - appendSize
+		&& appendSize <= availableBytes
+		&& availableBytes - appendSize >= kReservedStorageBytes;
+}
 
 BehaviorLedger &BehaviorLedger::Instance() {
 	static BehaviorLedger instance;
@@ -23,7 +43,67 @@ BehaviorLedger::BehaviorLedger()
 }
 
 BehaviorLedger::~BehaviorLedger() {
+	stopAsyncWriter();
 	flush();
+}
+
+void BehaviorLedger::startAsyncWriter() {
+	std::lock_guard lock(_asyncMutex);
+	if (_asyncWriter.joinable() || _asyncStopping) {
+		return;
+	}
+	_asyncWriter = std::thread([this] {
+		asyncWriterLoop();
+	});
+}
+
+void BehaviorLedger::stopAsyncWriter() {
+	{
+		std::lock_guard lock(_asyncMutex);
+		_asyncStopping = true;
+	}
+	_asyncWake.notify_one();
+	if (_asyncWriter.joinable()) {
+		_asyncWriter.join();
+	}
+}
+
+void BehaviorLedger::drainAsyncWriter() {
+	std::unique_lock lock(_asyncMutex);
+	_asyncDrained.wait(lock, [this] {
+		return _asyncQueue.empty() && !_asyncWriting;
+	});
+}
+
+void BehaviorLedger::asyncWriterLoop() {
+	while (true) {
+		auto pending = std::optional<PendingEvent>();
+		{
+			std::unique_lock lock(_asyncMutex);
+			_asyncWake.wait(lock, [this] {
+				return _asyncStopping || !_asyncQueue.empty();
+			});
+			if (_asyncQueue.empty()) {
+				break;
+			}
+			pending.emplace(std::move(_asyncQueue.front()));
+			_asyncQueue.pop_front();
+			_asyncWriting = true;
+		}
+		recordEvent(
+			pending->type,
+			pending->traceId,
+			pending->actor,
+			pending->payload,
+			pending->parentTraceId);
+		{
+			std::lock_guard lock(_asyncMutex);
+			_asyncWriting = false;
+			if (_asyncQueue.empty()) {
+				_asyncDrained.notify_all();
+			}
+		}
+	}
 }
 
 void BehaviorLedger::indexNativeReadUnlocked(
@@ -153,8 +233,13 @@ void BehaviorLedger::indexOmegaStateUnlocked(
 }
 
 void BehaviorLedger::init(const QString &storagePath) {
-	QMutexLocker locker(&_mutex);
-	initUnlocked(storagePath);
+	{
+		QMutexLocker locker(&_mutex);
+		initUnlocked(storagePath);
+	}
+	if (isInitialized()) {
+		startAsyncWriter();
+	}
 }
 
 void BehaviorLedger::initUnlocked(const QString &storagePath) {
@@ -341,6 +426,16 @@ bool BehaviorLedger::recordEvent(
 	}
 	const auto previousSize = _file->size();
 	const auto line = QJsonDocument(event.toJson()).toJson(QJsonDocument::Compact) + '\n';
+	auto storage = QStorageInfo(QFileInfo(_filePath).absolutePath());
+	storage.refresh();
+	const auto availableBytes = (storage.isValid() && storage.isReady())
+		? storage.bytesAvailable()
+		: int64(-1);
+	if (!LedgerStorageAllowsAppend(previousSize, line.size(), availableBytes)) {
+		_file->close();
+		_initialized = false;
+		return false;
+	}
 	if (_file->write(line) != line.size() || !_file->flush()) {
 		// Do not advance state when persistence fails.
 		_file->resize(previousSize);
@@ -357,6 +452,33 @@ bool BehaviorLedger::recordEvent(
 		event.traceId,
 		event.payload,
 		event.timestampMs);
+	return true;
+}
+
+bool BehaviorLedger::recordEventAsync(
+		EventType type,
+		const QString &traceId,
+		const QString &actor,
+		const QJsonObject &payload,
+		const QString &parentTraceId) {
+	{
+		QMutexLocker locker(&_mutex);
+		if (!_initialized && _filePath.isEmpty()) {
+			initUnlocked(QString());
+		}
+		if (!_initialized) {
+			return false;
+		}
+	}
+	startAsyncWriter();
+	{
+		std::lock_guard lock(_asyncMutex);
+		if (_asyncStopping || _asyncQueue.size() >= kMaxAsyncEvents) {
+			return false;
+		}
+		_asyncQueue.push_back({ type, traceId, actor, payload, parentTraceId });
+	}
+	_asyncWake.notify_one();
 	return true;
 }
 
@@ -426,6 +548,7 @@ bool BehaviorLedger::verifyOmegaStatePair(
 }
 
 void BehaviorLedger::flush() {
+	drainAsyncWriter();
 	QMutexLocker locker(&_mutex);
 	if (_file && _file->isOpen()) {
 		_file->flush();
