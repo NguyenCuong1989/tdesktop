@@ -39,6 +39,16 @@ using namespace details;
 
 std::atomic<int> GlobalAtomicRequestId = 0;
 
+[[nodiscard]] QString ApoRequestMethod(const SerializedRequest &request) {
+	if (!request || request->size() <= SerializedRequest::kMessageBodyPosition) {
+		return QStringLiteral("UNKNOWN_CONSTRUCTOR");
+	}
+	const auto constructor = static_cast<uint32>(
+		request->at(SerializedRequest::kMessageBodyPosition));
+	return QStringLiteral("constructor_0x%1").arg(
+		constructor, 8, 16, QLatin1Char('0'));
+}
+
 } // namespace
 
 namespace details {
@@ -1155,6 +1165,7 @@ bool Instance::Private::hasCallback(mtpRequestId requestId) const {
 
 void Instance::Private::processCallback(const Response &response) {
 	const auto requestId = response.requestId;
+	const auto requestMethod = ApoRequestMethod(getRequest(requestId));
 	ResponseHandler handler;
 	{
 		QMutexLocker locker(&_parserMapLock);
@@ -1171,7 +1182,7 @@ void Instance::Private::processCallback(const Response &response) {
 			// APΩ Choke Point: Inbound MTProto RPC Error Response Hook
 			apo::HookMtprotoResponse(
 				requestId,
-				QStringLiteral("RPC_ERROR"),
+				requestMethod,
 				false,
 				QJsonObject{
 					{ QStringLiteral("code"), static_cast<qint64>(error.code()) },
@@ -1214,10 +1225,18 @@ void Instance::Private::processCallback(const Response &response) {
 					"RESPONSE_PARSE_FAILED",
 					"Response parse failed."));
 			} else if (parsed && guard) {
+				const auto responseConstructor = static_cast<uint32>(
+					*response.reply.constData());
 				apo::HookMtprotoResponse(
 					requestId,
-					QStringLiteral("RPC_SUCCESS"),
-					true);
+					requestMethod,
+					true,
+					QJsonObject{
+						{ QStringLiteral("response_constructor_id"),
+							QStringLiteral("0x%1").arg(
+								responseConstructor, 8, 16, QLatin1Char('0')) },
+						{ QStringLiteral("response_word_count"), response.reply.size() }
+					});
 			}
 			if (guard) {
 				unregisterRequest(requestId);
@@ -2217,10 +2236,12 @@ void Instance::sendRequest(
 		bool needsLayer,
 		mtpRequestId afterRequestId) {
 	// APΩ Choke Point: Outbound MTProto Request Execution Hook
+	const auto requestMethod = ApoRequestMethod(request);
 	apo::HookMtprotoRequest(
 		requestId,
-		QStringLiteral("MTProtoRequest"),
+		requestMethod,
 		QJsonObject{
+			{ QStringLiteral("request_constructor_id"), requestMethod },
 			{ QStringLiteral("shifted_dc_id"), static_cast<qint64>(shiftedDcId) },
 			{ QStringLiteral("ms_can_wait"), static_cast<qint64>(msCanWait) }
 		});

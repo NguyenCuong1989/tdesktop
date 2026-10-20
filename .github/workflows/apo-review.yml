@@ -147,8 +147,9 @@ jobs:
           $runtime = Get-Content Telegram/SourceFiles/apo/apo_runtime.cpp -Raw
           $mtproto = Get-Content Telegram/SourceFiles/mtproto/mtp_instance.cpp -Raw
           $callback = ($mtproto -split 'void Instance::Private::processCallback\(', 2)[1] -split 'void Instance::Private::processUpdate\(', 2
-          if ($callback[0].IndexOf('const auto parsed =') -lt 0 -or
-              $callback[0].IndexOf('const auto parsed =') -gt $callback[0].IndexOf('QStringLiteral("RPC_SUCCESS")')) {
+          $successBranch = ($callback[0] -split 'else if \(parsed && guard\)', 2)
+          if ($successBranch.Count -ne 2 -or
+              $successBranch[1] -notmatch 'HookMtprotoResponse\(') {
               throw 'RPC_SUCCESS emitted before native response parse acceptance'
           }
           $body = ($executor -split 'void ActionExecutor::executeInternal\(', 2)[1]
@@ -159,6 +160,11 @@ jobs:
               $ledger -notmatch 'if \(!_initialized && _filePath\.isEmpty\(\)\)' -or
               !(Test-Path Telegram/build/apo_ledger_smoke.ps1)) {
               throw 'Ledger initialization/replay guard missing'
+          }
+          if ($ledger -notmatch 'hashVersion == 1' -or
+              $ledger -notmatch 'event\.parentTraceId' -or
+              $ledger -notmatch 'event\.timestampMs') {
+              throw 'Ledger hash v2 metadata binding or v1 replay compatibility missing'
           }
           if ($stateBridge -notmatch '_self\.userId != accountUserId' -or
               $dataSession -notmatch 'session\(\)\.userId\(\)\.bare' -or
@@ -194,6 +200,11 @@ jobs:
               $runtime -match 'payload\[QStringLiteral\("result"\)\] = result;' -or
               $runtime -match 'payload\[QStringLiteral\("data"\)\] = updateData;') {
               throw 'MTProto/private payload persisted without sanitization'
+          }
+          if ($mtproto -notmatch 'ApoRequestMethod\(' -or
+              $mtproto -notmatch 'response_constructor_id' -or
+              $runtime -notmatch 'response_word_count') {
+              throw 'Redacted MTProto operation and response-shape evidence missing'
           }
           Write-Host '[PASS] Static source guard only; native build and E2E require separate evidence.'
 

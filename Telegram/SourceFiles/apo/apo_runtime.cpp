@@ -158,6 +158,10 @@ void Runtime::onMtprotoRequest(
 	payload[QStringLiteral("method")] = method;
 	payload[QStringLiteral("parameter_count")] = params.size();
 	payload[QStringLiteral("parameters_redacted")] = true;
+	if (const auto constructor = params.value(
+		QStringLiteral("request_constructor_id")); constructor.isString()) {
+		payload[QStringLiteral("request_constructor_id")] = constructor;
+	}
 
 	RecordBehavior(
 		EventType::Execution,
@@ -177,6 +181,17 @@ void Runtime::onMtprotoResponse(
 	payload[QStringLiteral("success")] = success;
 	payload[QStringLiteral("result_field_count")] = result.size();
 	payload[QStringLiteral("result_redacted")] = true;
+	if (const auto constructor = result.value(
+		QStringLiteral("response_constructor_id")); constructor.isString()) {
+		payload[QStringLiteral("response_constructor_id")] = constructor;
+	}
+	if (const auto words = result.value(
+		QStringLiteral("response_word_count")); words.isDouble()) {
+		payload[QStringLiteral("response_word_count")] = words;
+	}
+	if (const auto code = result.value(QStringLiteral("code")); code.isDouble()) {
+		payload[QStringLiteral("error_code")] = code;
+	}
 
 	RecordBehavior(
 		EventType::ObservedResult,

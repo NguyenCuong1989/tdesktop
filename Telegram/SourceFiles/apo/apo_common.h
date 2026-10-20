@@ -79,6 +79,7 @@ enum class AuthorityLevel {
 }
 
 struct RawEvent {
+	int hashVersion = 2;
 	int64 sequence = 0;
 	QString traceId;
 	QString parentTraceId;
@@ -91,6 +92,7 @@ struct RawEvent {
 
 	[[nodiscard]] QJsonObject toJson() const {
 		QJsonObject obj;
+		obj[QStringLiteral("hash_version")] = hashVersion;
 		obj[QStringLiteral("sequence")] = static_cast<qint64>(sequence);
 		obj[QStringLiteral("trace_id")] = traceId;
 		if (!parentTraceId.isEmpty()) {

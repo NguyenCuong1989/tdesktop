@@ -209,19 +209,51 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 				return;
 			}
 			const auto sequence = static_cast<int64>(sequenceNumber);
+			const auto hashVersionValue = json.value(QStringLiteral("hash_version"));
+			const auto hashVersionNumber = hashVersionValue.isUndefined()
+				? 1.0 : hashVersionValue.toDouble(-1.0);
+			if (!std::isfinite(hashVersionNumber)
+				|| std::floor(hashVersionNumber) != hashVersionNumber) {
+				return;
+			}
+			const auto hashVersion = static_cast<int>(hashVersionNumber);
+			if (hashVersion != 1 && hashVersion != 2) {
+				return;
+			}
+			const auto timestampValue = json.value(QStringLiteral("timestamp_ms"));
+			const auto timestampNumber = timestampValue.toDouble(-1.0);
+			if (!timestampValue.isDouble() || !std::isfinite(timestampNumber)
+				|| timestampNumber < 0.0
+				|| timestampNumber > 9007199254740991.0
+				|| std::floor(timestampNumber) != timestampNumber) {
+				return;
+			}
+			const auto timestampMs = static_cast<int64>(timestampNumber);
 			const auto prevHash = json.value(QStringLiteral("prev_hash")).toString();
 			const auto eventHash = json.value(QStringLiteral("current_hash")).toString();
 			if (sequence != restoredSequence + 1 || prevHash != restoredHash || eventHash.size() != 64) {
 				return;
 			}
-			const auto canonicalData = QStringLiteral("%1:%2:%3:%4:%5:%6")
-				.arg(sequence)
-				.arg(json.value(QStringLiteral("trace_id")).toString())
-				.arg(json.value(QStringLiteral("event_type")).toString())
-				.arg(json.value(QStringLiteral("actor")).toString())
-				.arg(prevHash)
-				.arg(QString::fromUtf8(QJsonDocument(
-					json.value(QStringLiteral("payload")).toObject()).toJson(QJsonDocument::Compact)));
+			const auto payloadJson = QString::fromUtf8(QJsonDocument(
+				json.value(QStringLiteral("payload")).toObject()).toJson(QJsonDocument::Compact));
+			const auto canonicalData = (hashVersion == 1)
+				? QStringLiteral("%1:%2:%3:%4:%5:%6")
+					.arg(sequence)
+					.arg(json.value(QStringLiteral("trace_id")).toString())
+					.arg(json.value(QStringLiteral("event_type")).toString())
+					.arg(json.value(QStringLiteral("actor")).toString())
+					.arg(prevHash)
+					.arg(payloadJson)
+				: QStringLiteral("%1:%2:%3:%4:%5:%6:%7:%8:%9")
+					.arg(hashVersion)
+					.arg(sequence)
+					.arg(json.value(QStringLiteral("trace_id")).toString())
+					.arg(json.value(QStringLiteral("parent_trace_id")).toString())
+					.arg(json.value(QStringLiteral("event_type")).toString())
+					.arg(json.value(QStringLiteral("actor")).toString())
+					.arg(timestampMs)
+					.arg(prevHash)
+					.arg(payloadJson);
 			const auto expectedHash = QString::fromUtf8(QCryptographicHash::hash(
 				canonicalData.toUtf8(), QCryptographicHash::Sha256).toHex());
 			if (eventHash != expectedHash) {
@@ -233,13 +265,13 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 				json.value(QStringLiteral("actor")).toString(),
 				json.value(QStringLiteral("trace_id")).toString(),
 				json.value(QStringLiteral("payload")).toObject(),
-				static_cast<int64>(json.value(QStringLiteral("timestamp_ms")).toDouble()));
+				timestampMs);
 			indexOmegaStateUnlocked(
 				json.value(QStringLiteral("event_type")).toString(),
 				json.value(QStringLiteral("actor")).toString(),
 				json.value(QStringLiteral("trace_id")).toString(),
 				json.value(QStringLiteral("payload")).toObject(),
-				static_cast<int64>(json.value(QStringLiteral("timestamp_ms")).toDouble()));
+				timestampMs);
 			restoredHash = eventHash;
 			restoredSequence = sequence;
 		}
@@ -285,12 +317,16 @@ bool BehaviorLedger::recordEvent(
 	event.prevHash = _lastHash;
 	event.timestampMs = nowMs;
 
-	// Compute canonical SHA-256 hash over event payload + prevHash
-	const auto canonicalData = QStringLiteral("%1:%2:%3:%4:%5:%6")
+	// Version 2 also binds event timing and trace parentage. Existing v1
+	// records remain readable so a verified ledger can upgrade in place.
+	const auto canonicalData = QStringLiteral("%1:%2:%3:%4:%5:%6:%7:%8:%9")
+		.arg(event.hashVersion)
 		.arg(event.sequence)
 		.arg(event.traceId)
+		.arg(event.parentTraceId)
 		.arg(EventTypeToString(event.type))
 		.arg(event.actor)
+		.arg(event.timestampMs)
 		.arg(event.prevHash)
 		.arg(QString::fromUtf8(QJsonDocument(event.payload).toJson(QJsonDocument::Compact)));
 

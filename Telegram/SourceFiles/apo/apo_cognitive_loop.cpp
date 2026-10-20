@@ -6,7 +6,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "apo/apo_cognitive_loop.h"
 #include "apo/apo_state_bridge.h"
-#include "apo/apo_economy_state.h"
 #include "apo/apo_verifier.h"
 #include "apo/apo_executor.h"
 #include "apo/apo_behavior_ledger.h"
@@ -99,19 +98,14 @@ void CognitiveLoop::step() {
 	// 1. OBSERVE: Fetch native session state
 	const auto self = StateBridge::Instance().currentSelf();
 
-	// 2. ESTIMATE: Evaluate economic state vector X_t
-	const auto ecoState = EconomyEngine::Instance().currentState();
-
-	// 3. COMPUTE: Calculate active capital and unread pressure
-	const double activeCap = ecoState.activeCapital();
+	// 2. COMPUTE: Record only observed Telegram state. The optional economy
+	// engine has no live producer for its full vector and cannot supply priors.
 	const int unreadCount = self.unreadTotal;
 
 	QJsonObject computePayload;
 	computePayload[QStringLiteral("cycle")] = static_cast<qint64>(_cycleCount);
 	computePayload[QStringLiteral("has_user_identity")] = (self.userId != 0);
 	computePayload[QStringLiteral("unread")] = unreadCount;
-	computePayload[QStringLiteral("active_capital")] = activeCap;
-	computePayload[QStringLiteral("trust")] = ecoState.T;
 
 	RecordBehavior(
 		EventType::Computation,

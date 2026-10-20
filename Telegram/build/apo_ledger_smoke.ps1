@@ -83,4 +83,32 @@ if ($traceIds.Count -ne 2 -or $traceIds[0] -eq $traceIds[1]) {
     throw 'Generated trace IDs are not unique'
 }
 Write-Output '[PASS] generated trace IDs are unique across adjacent events'
-Write-Output '[PASS] native ledger smoke 12/12'
+$upgradeLedger = Join-Path $out 'omega-v1-to-v2-upgrade-valid.jsonl'
+Remove-Item -LiteralPath $upgradeLedger -ErrorAction SilentlyContinue
+$legacyPayload = '{"kind":"HASH_V1_FIXTURE"}'
+$legacyCanonical = '1:v1-fixture:RAW.COMPUTATION:test.ledger:' + ('0' * 64) + ':' + $legacyPayload
+$legacyBytes = [Text.Encoding]::UTF8.GetBytes($legacyCanonical)
+$legacySha = [Security.Cryptography.SHA256]::Create()
+try {
+    $legacyHash = [Convert]::ToHexString(
+        $legacySha.ComputeHash($legacyBytes)).ToLowerInvariant()
+} finally {
+    $legacySha.Dispose()
+}
+$legacyLine = '{"actor":"test.ledger","current_hash":"' + $legacyHash +
+    '","event_type":"RAW.COMPUTATION","payload":' + $legacyPayload +
+    ',"prev_hash":"' + ('0' * 64) +
+    '","sequence":1,"timestamp_ms":1000,"trace_id":"v1-fixture"}'
+[IO.File]::WriteAllText($upgradeLedger, $legacyLine + "`n",
+    [Text.UTF8Encoding]::new($false))
+& $exe 'append-legacy-v1' $upgradeLedger
+if ($LASTEXITCODE -ne 0) { throw "Ledger v1-to-v2 upgrade failed: $LASTEXITCODE" }
+$upgraded = Get-Content -LiteralPath $upgradeLedger | ForEach-Object { $_ | ConvertFrom-Json }
+if ($upgraded.Count -ne 2 -or
+    $null -ne $upgraded[0].PSObject.Properties['hash_version'] -or
+    $upgraded[1].hash_version -ne 2 -or
+    $upgraded[1].parent_trace_id -ne 'v1-fixture') {
+    throw 'Ledger v1-to-v2 upgrade did not preserve the expected hash schema boundary'
+}
+Write-Output '[PASS] verified hash v1 ledger upgrades in place to metadata-bound v2 events'
+Write-Output '[PASS] native ledger smoke 13/13'

@@ -103,6 +103,14 @@ int main(int argc, char **argv) {
             QString(), QStringLiteral("test.ledger"), payload)) return 102;
         return ledger.totalEvents() == 2 ? 0 : 103;
     }
+    if (mode == QStringLiteral("append-legacy-v1")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 1) return 104;
+        QJsonObject payload;
+        payload[QStringLiteral("kind")] = QStringLiteral("HASH_V2_UPGRADE_FIXTURE");
+        return ledger.recordEvent(apo::EventType::Computation,
+            QStringLiteral("v2-upgrade"), QStringLiteral("test.ledger"), payload,
+            QStringLiteral("v1-fixture")) && ledger.totalEvents() == 2 ? 0 : 105;
+    }
     if (mode == QStringLiteral("write")) {
         if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 31;
         for (int i = 0; i != 3; ++i) {

@@ -48,6 +48,9 @@ $totals = [ordered]@{
     sequenceErrors=0
     prevHashLinkErrors=0
     sha256Errors=0
+    hashVersion1Events=0
+    hashVersion2Events=0
+    unsupportedHashVersions=0
     authenticatedStateObservations=0
     positiveUnreadComputations=0
     plannedActions=0
@@ -82,6 +85,14 @@ try {
             $sequence = [long]$event.sequence
             $prev = [string]$event.prev_hash
             $current = [string]$event.current_hash
+            $hashVersion = if ($null -eq $event.PSObject.Properties['hash_version']) {
+                [double]1
+            } else {
+                [double]$event.hash_version
+            }
+            if ($hashVersion -eq 1) { $totals.hashVersion1Events++ }
+            elseif ($hashVersion -eq 2) { $totals.hashVersion2Events++ }
+            else { $totals.unsupportedHashVersions++ }
             if ($sequence -ne ($lastSequence + 1)) { $totals.sequenceErrors++ }
             if ($prev -ne $lastHash) { $totals.prevHashLinkErrors++ }
             $payloadStart = $line.IndexOf('"payload":') + 10
@@ -90,8 +101,17 @@ try {
                 throw 'Ledger payload bounds are invalid'
             }
             $payloadJson = $line.Substring($payloadStart, $payloadEnd - $payloadStart)
-            $canonical = '{0}:{1}:{2}:{3}:{4}:{5}' -f $sequence,
-                [string]$event.trace_id, $type, $actor, $prev, $payloadJson
+            $canonical = if ($hashVersion -eq 1) {
+                '{0}:{1}:{2}:{3}:{4}:{5}' -f $sequence,
+                    [string]$event.trace_id, $type, $actor, $prev, $payloadJson
+            } elseif ($hashVersion -eq 2) {
+                '{0}:{1}:{2}:{3}:{4}:{5}:{6}:{7}:{8}' -f $hashVersion,
+                    $sequence, [string]$event.trace_id,
+                    [string]$event.parent_trace_id, $type, $actor,
+                    [long]$event.timestamp_ms, $prev, $payloadJson
+            } else {
+                ''
+            }
             $canonicalBytes = [Text.Encoding]::UTF8.GetBytes($canonical)
             $expectedHash = [Convert]::ToHexString(
                 $sha256.ComputeHash($canonicalBytes)).ToLowerInvariant()
@@ -415,7 +435,7 @@ $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debu
     reachedEndOfLedger=$reachedEndOfLedger
     evaluatedPrefixIntegrityValid=($totals.parseErrors -eq 0 -and
         $totals.sequenceErrors -eq 0 -and $totals.prevHashLinkErrors -eq 0 -and
-        $totals.sha256Errors -eq 0)
+        $totals.sha256Errors -eq 0 -and $totals.unsupportedHashVersions -eq 0)
     eventTypes=Rows $types
     actors=Rows $actors
     operationResults=Rows $results
