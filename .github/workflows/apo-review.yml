@@ -188,6 +188,10 @@ jobs:
           }
           Write-Host '[PASS] Static source guard only; native build and E2E require separate evidence.'
 
+      - name: Test Native Ledger Audit Integrity Gate
+        shell: pwsh
+        run: Telegram/build/apo_behavior_audit_test.ps1
+
   apo-build-gate:
     name: APΩ Native Toolchain Presence (Not a Binary Build)
     needs: apo-review-gate

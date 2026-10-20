@@ -2,7 +2,8 @@
 # Reads ONLY structural fields: no phone, message body, tokens, or account identifiers.
 param(
     [string]$WorkingDir = '',
-    [int]$MaxEvents = 200000
+    [int]$MaxEvents = 200000,
+    [string]$LedgerPath = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -10,7 +11,11 @@ if ([string]::IsNullOrWhiteSpace($WorkingDir)) {
     $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
     $WorkingDir = Join-Path $repo 'out\omega-native-authorized'
 }
-$ledger = Join-Path $WorkingDir 'apo\raw_behavior.jsonl'
+$ledger = if ([string]::IsNullOrWhiteSpace($LedgerPath)) {
+    Join-Path $WorkingDir 'apo\raw_behavior.jsonl'
+} else {
+    $LedgerPath
+}
 if (!(Test-Path -LiteralPath $ledger)) {
     throw 'This native Telegram profile has no APΩ ledger; runtime not evidenced'
 }
@@ -32,11 +37,17 @@ $lastRuntimeLatestUnread = $null
 $lastNativeUnreadRanking = $null
 $lastRuntimeRankingEvents = 0
 $rankingShapeErrors = 0
+$nativeBodyProjectionEvents = 0
+$completeNativeBodyProjectionEvents = 0
+$nativeBodyShapeErrors = 0
+$lastNativeBodyProjection = $null
+$recoveryPendingEvents = 0
 $totals = [ordered]@{
     eventCount=0
     parseErrors=0
     sequenceErrors=0
     prevHashLinkErrors=0
+    sha256Errors=0
     authenticatedStateObservations=0
     positiveUnreadComputations=0
     plannedActions=0
@@ -54,6 +65,8 @@ $totals = [ordered]@{
 }
 $lastSequence = [long]0
 $lastHash = '0' * 64
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$reachedEndOfLedger = $false
 try {
     $file = [IO.FileStream]::new(
         $ledger, [IO.FileMode]::Open, [IO.FileAccess]::Read,
@@ -68,10 +81,23 @@ try {
             $actor = [string]$event.actor
             $sequence = [long]$event.sequence
             $prev = [string]$event.prev_hash
+            $current = [string]$event.current_hash
             if ($sequence -ne ($lastSequence + 1)) { $totals.sequenceErrors++ }
             if ($prev -ne $lastHash) { $totals.prevHashLinkErrors++ }
+            $payloadStart = $line.IndexOf('"payload":') + 10
+            $payloadEnd = $line.LastIndexOf(',"prev_hash":')
+            if ($payloadStart -lt 10 -or $payloadEnd -lt $payloadStart) {
+                throw 'Ledger payload bounds are invalid'
+            }
+            $payloadJson = $line.Substring($payloadStart, $payloadEnd - $payloadStart)
+            $canonical = '{0}:{1}:{2}:{3}:{4}:{5}' -f $sequence,
+                [string]$event.trace_id, $type, $actor, $prev, $payloadJson
+            $canonicalBytes = [Text.Encoding]::UTF8.GetBytes($canonical)
+            $expectedHash = [Convert]::ToHexString(
+                $sha256.ComputeHash($canonicalBytes)).ToLowerInvariant()
+            if ($current -ne $expectedHash) { $totals.sha256Errors++ }
             $lastSequence = $sequence
-            $lastHash = [string]$event.current_hash
+            $lastHash = $current
             $totals.eventCount++
             if (!$types.ContainsKey($type)) { $types[$type] = 0 }
             $types[$type]++
@@ -179,6 +205,80 @@ try {
                         topUnreadCounts=@($top | ForEach-Object {[int]$_.unread_messages})
                     }
                 }
+                if ($actor -eq 'apo.state_bridge.native_body') {
+                    $nativeBodyProjectionEvents++
+                    $requiredBodyFields = @(
+                        'account_scope', 'source_trace_id', 'measured_at_ms',
+                        'total_loaded_rows', 'inspected_rows', 'history_rows',
+                        'user_dialogs', 'basic_groups', 'supergroups',
+                        'broadcast_channels', 'unclassified_peers',
+                        'known_unread_rows', 'unread_dialogs', 'mentioned_dialogs',
+                        'source_loaded', 'complete'
+                    )
+                    $bodyFieldsPresent = @($requiredBodyFields | Where-Object {
+                        $props.ContainsKey($_)
+                    }).Count -eq $requiredBodyFields.Count
+                    $historyRows = [int]$props['history_rows']
+                    $userDialogs = [int]$props['user_dialogs']
+                    $basicGroups = [int]$props['basic_groups']
+                    $supergroups = [int]$props['supergroups']
+                    $broadcastChannels = [int]$props['broadcast_channels']
+                    $unclassifiedPeers = [int]$props['unclassified_peers']
+                    $knownUnreadRows = [int]$props['known_unread_rows']
+                    $unreadDialogs = [int]$props['unread_dialogs']
+                    $mentionedDialogs = [int]$props['mentioned_dialogs']
+                    $classifiedRows = $userDialogs + $basicGroups + $supergroups +
+                        $broadcastChannels + $unclassifiedPeers
+                    $bodyComplete = ($props['complete'] -eq $true)
+                    $shapeValid = ($bodyFieldsPresent -and
+                        $props['kind'] -eq 'NATIVE_BODY_PROJECTION' -and
+                        $props['source'] -eq 'Data::Session.chatsList/History::peer' -and
+                        ![string]::IsNullOrWhiteSpace([string]$props['account_scope']) -and
+                        ![string]::IsNullOrWhiteSpace([string]$props['source_trace_id']) -and
+                        [long]$props['measured_at_ms'] -gt 0 -and
+                        [int]$props['inspected_rows'] -ge 0 -and
+                        [int]$props['inspected_rows'] -le [int]$props['total_loaded_rows'] -and
+                        $historyRows -ge 0 -and
+                        $historyRows -le [int]$props['inspected_rows'] -and
+                        $userDialogs -ge 0 -and $basicGroups -ge 0 -and
+                        $supergroups -ge 0 -and $broadcastChannels -ge 0 -and
+                        $unclassifiedPeers -ge 0 -and
+                        $classifiedRows -eq $historyRows -and
+                        $knownUnreadRows -ge 0 -and $knownUnreadRows -le $historyRows -and
+                        $unreadDialogs -ge 0 -and $unreadDialogs -le $knownUnreadRows -and
+                        $mentionedDialogs -ge 0 -and
+                        $mentionedDialogs -le $knownUnreadRows -and
+                        (!$bodyComplete -or ($props['source_loaded'] -eq $true -and
+                            [int]$props['inspected_rows'] -eq
+                                [int]$props['total_loaded_rows'] -and
+                            $unclassifiedPeers -eq 0)))
+                    if (!$shapeValid) { $nativeBodyShapeErrors++ }
+                    if ($bodyComplete) { $completeNativeBodyProjectionEvents++ }
+                    $lastNativeBodyProjection = [ordered]@{
+                        sequence=$sequence
+                        measuredAtMs=[long]$props['measured_at_ms']
+                        loadedRows=[int]$props['total_loaded_rows']
+                        inspectedRows=[int]$props['inspected_rows']
+                        historyRows=$historyRows
+                        userDialogs=$userDialogs
+                        basicGroups=$basicGroups
+                        supergroups=$supergroups
+                        broadcastChannels=$broadcastChannels
+                        unclassifiedPeers=$unclassifiedPeers
+                        knownUnreadRows=$knownUnreadRows
+                        unreadDialogs=$unreadDialogs
+                        mentionedDialogs=$mentionedDialogs
+                        sourceLoaded=($props['source_loaded'] -eq $true)
+                        complete=$bodyComplete
+                        shapeValid=$shapeValid
+                    }
+                }
+                if ($actor -eq 'apo.cognitive.recovery' -and
+                    $props['kind'] -eq 'NATIVE_READ_RECOVERY_PENDING' -and
+                    $props['result'] -eq 'OUTCOME_UNRESOLVED' -and
+                    $props['new_phase'] -eq 'RECONCILING') {
+                    $recoveryPendingEvents++
+                }
                 if ($actor -eq 'apo.mtproto.dispatcher' -and
                     $props.ContainsKey('req_id')) {
                     $totals.nativeRpcRequests++
@@ -246,9 +346,11 @@ try {
             $totals.parseErrors++
         }
     }
+    $reachedEndOfLedger = $reader.EndOfStream
 } finally {
     if ($reader) { $reader.Dispose() }
     if ($file) { $file.Dispose() }
+    $sha256.Dispose()
 }
 function Rows($map) {
     $rows = @()
@@ -309,6 +411,11 @@ $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debu
     ledgerBytes=(Get-Item $ledger).Length
     eventTotals=$totals
     lastSequence=$lastSequence
+    lastHash=$lastHash
+    reachedEndOfLedger=$reachedEndOfLedger
+    evaluatedPrefixIntegrityValid=($totals.parseErrors -eq 0 -and
+        $totals.sequenceErrors -eq 0 -and $totals.prevHashLinkErrors -eq 0 -and
+        $totals.sha256Errors -eq 0)
     eventTypes=Rows $types
     actors=Rows $actors
     operationResults=Rows $results
@@ -324,6 +431,11 @@ $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debu
     lastRuntimeRankingEvents=$lastRuntimeRankingEvents
     lastNativeUnreadRanking=$lastNativeUnreadRanking
     rankingShapeErrors=$rankingShapeErrors
+    nativeBodyProjectionEvents=$nativeBodyProjectionEvents
+    completeNativeBodyProjectionEvents=$completeNativeBodyProjectionEvents
+    nativeBodyShapeErrors=$nativeBodyShapeErrors
+    lastNativeBodyProjection=$lastNativeBodyProjection
+    recoveryPendingEvents=$recoveryPendingEvents
     unmatchedRpcRequestsInLastProcess=$rpcPending.Count
     rpcCorrelationInterpretation='MTProto request/response telemetry is not an APΩ action_id-linked result'
     interpretation='Event types and phase names are telemetry, NOT proof of server ACK or real-world value'
