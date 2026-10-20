@@ -1,5 +1,6 @@
 #include "apo/apo_behavior_ledger.h"
 #include "apo/apo_executor.h"
+#include "apo/apo_state_bridge.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QJsonObject>
@@ -19,9 +20,79 @@ int main(int argc, char **argv) {
         if (!apo::NativeDialogsPostconditionConfirmed(true, 16, 16)) return 58;
         return 0;
     }
+    if (mode == QStringLiteral("native-body-contract")) {
+        apo::NativeBodyProjection state;
+        state.accountUserId = 123;
+        state.accountScope = QStringLiteral("account-scope-test");
+        state.sourceTraceId = QStringLiteral("body-cycle-test");
+        state.measuredAtMs = QDateTime::currentMSecsSinceEpoch();
+        state.sourceLoaded = true;
+        state.totalLoadedRows = 7;
+        state.inspectedRows = 7;
+        state.historyRows = 6;
+        state.userDialogs = 2;
+        state.basicGroups = 1;
+        state.supergroups = 1;
+        state.broadcastChannels = 2;
+        state.knownUnreadRows = 5;
+        state.unreadDialogs = 3;
+        state.mentionedDialogs = 1;
+        state.complete = true;
+        if (!state.structurallyValid()) return 81;
+        const auto payload = state.toJson();
+        if (payload.value(QStringLiteral("native_dispatch")).toBool(true)) return 82;
+        if (payload.contains(QStringLiteral("account_user_id"))) return 83;
+        ++state.unclassifiedPeers;
+        if (state.structurallyValid()) return 84;
+        --state.unclassifiedPeers;
+        ++state.knownUnreadRows;
+        ++state.knownUnreadRows;
+        if (state.structurallyValid()) return 85;
+        state.knownUnreadRows = 5;
+        state.totalLoadedRows = 8;
+        if (state.structurallyValid()) return 86;
+        state.complete = false;
+        if (!state.structurallyValid()) return 87;
+        state.accountScope.clear();
+        if (state.structurallyValid()) return 88;
+        return 0;
+    }
     auto path = QString::fromLocal8Bit(argv[2]);
     auto &ledger = apo::BehaviorLedger::Instance();
     ledger.init(path);
+    if (mode == QStringLiteral("native-body-bridge")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 91;
+        auto &bridge = apo::StateBridge::Instance();
+        bridge.updateUserProfile(77, QString(), QString(), QString(), QString(), false);
+        apo::NativeBodyProjection state;
+        state.accountUserId = 77;
+        state.accountScope = QStringLiteral("bridge-test-account-scope");
+        state.sourceTraceId = QStringLiteral("bridge-test-observed-cycle");
+        state.measuredAtMs = QDateTime::currentMSecsSinceEpoch();
+        state.totalLoadedRows = 3;
+        state.inspectedRows = 3;
+        state.historyRows = 3;
+        state.userDialogs = 1;
+        state.basicGroups = 1;
+        state.broadcastChannels = 1;
+        state.knownUnreadRows = 3;
+        state.unreadDialogs = 1;
+        state.sourceLoaded = true;
+        state.complete = true;
+        if (!bridge.updateNativeBodyProjection(state)) return 92;
+        const auto known = bridge.currentNativeBodyProjection(77);
+        if (!known || known->sourceTraceId != state.sourceTraceId) return 93;
+        if (bridge.currentNativeBodyProjection(78)) return 94;
+        if (bridge.updateNativeBodyProjection(state)) return 95;
+        state.accountUserId = 78;
+        state.measuredAtMs += 1;
+        if (bridge.updateNativeBodyProjection(state)) return 96;
+        bridge.updateUserProfile(78, QString(), QString(), QString(), QString(), false);
+        if (bridge.currentNativeBodyProjection(77)) return 97;
+        if (bridge.currentNativeBodyProjection(78)) return 98;
+        if (ledger.totalEvents() != 3) return 99;
+        return 0;
+    }
     if (mode == QStringLiteral("write")) {
         if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 31;
         for (int i = 0; i != 3; ++i) {

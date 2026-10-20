@@ -14,6 +14,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_session.h"
 #include "data/data_session.h"
+#include "data/data_peer.h"
+#include "history/history.h"
 #include "dialogs/dialogs_main_list.h"
 #include "settings.h"
 #include <QtCore/QCryptographicHash>
@@ -121,7 +123,7 @@ void CognitiveLoop::step() {
 	// whole-account unread badge as an addressable chat or a customer request.
 	// A nonzero badge alone cannot authorize "compute.draft_reply": there
 	// is no message context, recipient, actual draft or measurable cost.
-	if (self.userId == 0 || unreadCount <= 0) {
+	if (self.userId == 0) {
 		return;
 	}
 	const auto session = Core::App().activeAccount().maybeSession();
@@ -142,6 +144,13 @@ void CognitiveLoop::step() {
 	const auto limit = std::min(int(rows.size()), kMaxInspected);
 	int knownRows = 0;
 	int historyRows = 0;
+	int userDialogs = 0;
+	int basicGroups = 0;
+	int supergroups = 0;
+	int broadcastChannels = 0;
+	int unclassifiedPeers = 0;
+	int unreadDialogs = 0;
+	int mentionedDialogs = 0;
 	auto rowIterator = rows.cbegin();
 	for (auto i = 0; i != limit; ++i, ++rowIterator) {
 		const auto row = *rowIterator;
@@ -149,6 +158,17 @@ void CognitiveLoop::step() {
 			continue; // A folder is not an independent conversation.
 		}
 		++historyRows;
+		const auto peer = row->history()->peer;
+		if (peer->isUser()) {
+			++userDialogs;
+		} else if (peer->isChat()) {
+			++basicGroups;
+		} else if (peer->isChannel()) {
+			if (peer->isMegagroup()) ++supergroups;
+			else ++broadcastChannels;
+		} else {
+			++unclassifiedPeers;
+		}
 		const auto state = row->entry()->chatListUnreadState();
 		if (!state.known) {
 			continue; // Unknown is not zero unread.
@@ -157,6 +177,8 @@ void CognitiveLoop::step() {
 		const auto unread = std::max(state.messages, 0);
 		const auto unmuted = std::max(unread - state.messagesMuted, 0);
 		const auto mentions = std::max(state.mentions, 0);
+		if (unread > 0) ++unreadDialogs;
+		if (mentions > 0) ++mentionedDialogs;
 		if (unread > 0 || mentions > 0) {
 			ranked.push_back({ i, unread, unmuted, mentions });
 		}
@@ -252,7 +274,7 @@ void CognitiveLoop::step() {
 	}
 	const auto revisitMs = _lastRemoteInspectionSucceeded
 		? kRefreshAfterSuccessMs : kRetryAfterFailureMs;
-	const auto inspectionDue = !_remoteInspectionInFlight
+	const auto inspectionDue = unreadCount > 0 && !_remoteInspectionInFlight
 		&& (_lastRemoteInspectionAtMs == 0
 			|| (elapsedMs >= 0 && elapsedMs >= revisitMs));
 
@@ -266,6 +288,30 @@ void CognitiveLoop::step() {
 		(QString::number(self.userId) + QStringLiteral("|")
 			+ cWorkingDir()).toUtf8(),
 		QCryptographicHash::Sha256).toHex());
+	// Feed the existing StateBridge with distinct, measured native body types.
+	// This is observation only: no new action policy or convergence assumption.
+	NativeBodyProjection body;
+	body.accountUserId = self.userId;
+	body.accountScope = accountScope;
+	body.sourceTraceId = traceId;
+	body.measuredAtMs = nowMs;
+	body.totalLoadedRows = int(rows.size());
+	body.inspectedRows = limit;
+	body.historyRows = historyRows;
+	body.userDialogs = userDialogs;
+	body.basicGroups = basicGroups;
+	body.supergroups = supergroups;
+	body.broadcastChannels = broadcastChannels;
+	body.unclassifiedPeers = unclassifiedPeers;
+	body.knownUnreadRows = knownRows;
+	body.unreadDialogs = unreadDialogs;
+	body.mentionedDialogs = mentionedDialogs;
+	body.sourceLoaded = list->loaded();
+	body.complete = list->loaded() && limit == int(rows.size())
+		&& unclassifiedPeers == 0;
+	if (!StateBridge::Instance().updateNativeBodyProjection(body)) {
+		return; // Never compute an action from an unpersisted body state.
+	}
 	// Restore unresolved native dispatches from the already verified RAW chain.
 	// These are recovery observations, NOT inferred RPC failures or successes.
 	if (_lastRecoveryAccountScope != accountScope) {

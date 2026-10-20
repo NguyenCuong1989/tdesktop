@@ -18,6 +18,7 @@ $include = @(
 $compiler = 'cl /nologo /std:c++20 /EHsc /MTd ' + $include
 $compiler += ' "' + $source + '"'
 $compiler += ' "' + (Join-Path $repo 'Telegram\SourceFiles\apo\apo_behavior_ledger.cpp') + '"'
+$compiler += ' "' + (Join-Path $repo 'Telegram\SourceFiles\apo\apo_state_bridge.cpp') + '"'
 $compiler += ' /Fe:"' + $exe + '"'
 $compiler += ' /link /LIBPATH:"' + (Join-Path $qt 'lib') + '"'
 $compiler += ' Qt5Cored.lib qtpcre2d.lib ws2_32.lib user32.lib advapi32.lib shell32.lib ole32.lib version.lib netapi32.lib userenv.lib winmm.lib'
@@ -65,4 +66,12 @@ foreach ($mode in @('recovery-write', 'recovery-reopen', 'recovery-closed')) {
     if ($LASTEXITCODE -ne 0) { throw "Native recovery ledger $mode failed: $LASTEXITCODE" }
     Write-Output "[PASS] $mode"
 }
-Write-Output '[PASS] native ledger smoke 9/9'
+& $exe 'native-body-contract' $ledger
+if ($LASTEXITCODE -ne 0) { throw "Native body projection contract invalid: $LASTEXITCODE" }
+Write-Output '[PASS] native body perception contract is account-scoped and read-only'
+$nativeBodyLedger = Join-Path $out 'omega-native-body-bridge-valid.jsonl'
+Remove-Item -LiteralPath $nativeBodyLedger -ErrorAction SilentlyContinue
+& $exe 'native-body-bridge' $nativeBodyLedger
+if ($LASTEXITCODE -ne 0) { throw "Native StateBridge account-projection integration failed: $LASTEXITCODE" }
+Write-Output '[PASS] native body bridge persists account-scoped projection and resets on account switch'
+Write-Output '[PASS] native ledger smoke 11/11'

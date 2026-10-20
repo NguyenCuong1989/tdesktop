@@ -25,6 +25,7 @@ void StateBridge::updateUserProfile(
 	if (_self.userId != userId) {
 		// A session switch/logout must not leak the previous account's state.
 		_self = SelfState();
+		_bodyProjection.reset();
 	}
 	_self.userId = userId;
 	_self.username = username;
@@ -134,6 +135,36 @@ void StateBridge::updateTelegramTonCredits(
 	payload[QStringLiteral("balance_loaded")] = true;
 	RecordBehavior(EventType::StateReduce, QString(),
 		QStringLiteral("apo.state_bridge.telegram_ton"), payload);
+}
+
+bool StateBridge::updateNativeBodyProjection(const NativeBodyProjection &projection) {
+	QMutexLocker locker(&_mutex);
+	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
+	if (!_self.userId || _self.userId != projection.accountUserId
+		|| !projection.structurallyValid()
+		|| projection.measuredAtMs > nowMs
+		|| nowMs - projection.measuredAtMs > 5000
+		|| (_bodyProjection
+			&& projection.measuredAtMs <= _bodyProjection->measuredAtMs)) {
+		return false;
+	}
+	// Persist from the native C++ observation path before exposing the
+	// projection to any consumer. No peer IDs, text, or contact details.
+	if (!RecordBehavior(EventType::StateReduce, projection.sourceTraceId,
+		QStringLiteral("apo.state_bridge.native_body"), projection.toJson())) {
+		return false;
+	}
+	_bodyProjection = projection;
+	return true;
+}
+
+std::optional<NativeBodyProjection> StateBridge::currentNativeBodyProjection(
+	int64 accountUserId) const {
+	QMutexLocker locker(&_mutex);
+	if (!accountUserId || accountUserId != _self.userId || !_bodyProjection) {
+		return std::nullopt;
+	}
+	return _bodyProjection;
 }
 
 SelfState StateBridge::currentSelf() const {
