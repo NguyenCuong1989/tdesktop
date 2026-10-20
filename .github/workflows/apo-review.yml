@@ -22,7 +22,7 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout Repository with Submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -198,7 +198,7 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout Repository with Submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 1

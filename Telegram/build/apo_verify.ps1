@@ -1,11 +1,15 @@
 param(
     [switch]$Fetch,
     [switch]$RunReferenceTests,
-    [string]$ReferenceRepo = "C:\Users\pc\Documents\GitHub\telegram-unified-ecosystem"
+    [string]$ReferenceRepo = ''
 )
 
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
+if ([string]::IsNullOrWhiteSpace($ReferenceRepo)) {
+    $ReferenceRepo = Join-Path (Split-Path $repo -Parent) `
+        'telegram-unified-ecosystem'
+}
 Set-Location $repo
 
 function Pass([string]$m) { Write-Host "[PASS] $m" -ForegroundColor Green }
