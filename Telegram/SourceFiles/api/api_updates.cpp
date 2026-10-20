@@ -61,6 +61,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_streamed_drafts.h"
 #include "history/history_unread_things.h"
 #include "core/application.h"
+#include "apo/apo_runtime.h"
 #include "storage/storage_account.h"
 #include "storage/storage_facade.h"
 #include "storage/storage_user_photos.h"
@@ -1502,6 +1503,14 @@ void Updates::applyUpdateNoPtsCheck(const MTPUpdate &update) {
 void Updates::applyUpdates(
 		const MTPUpdates &updates,
 		uint64 sentMessageRandomId) {
+	// APΩ Choke Point: Inbound MTProto Updates Observation
+	apo::HookServerUpdate(
+		QStringLiteral("MTPUpdates"),
+		QJsonObject{
+			{ QStringLiteral("type"), static_cast<qint64>(updates.type()) },
+			{ QStringLiteral("sent_random_id"), static_cast<qint64>(sentMessageRandomId) }
+		});
+
 	const auto randomId = sentMessageRandomId;
 
 	switch (updates.type()) {

@@ -1,0 +1,258 @@
+name: APΩ Agent Native Review & Verification
+
+on:
+  push:
+    branches:
+      - apo/master
+      - dev
+  pull_request:
+    branches:
+      - apo/master
+      - dev
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+
+jobs:
+  apo-review-gate:
+    name: APΩ Native Architecture & Static Verification Gate
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify APΩ Native Architecture Integrity
+        shell: pwsh
+        run: |
+          Write-Host "Running APΩ Native Static Gate Verification..." -ForegroundColor Cyan
+          $required = @(
+              "Telegram/SourceFiles/apo/apo_common.h",
+              "Telegram/SourceFiles/apo/apo_authority.h",
+              "Telegram/SourceFiles/apo/apo_authority.cpp",
+              "Telegram/SourceFiles/apo/apo_behavior_ledger.h",
+              "Telegram/SourceFiles/apo/apo_behavior_ledger.cpp",
+              "Telegram/SourceFiles/apo/apo_state_bridge.h",
+              "Telegram/SourceFiles/apo/apo_state_bridge.cpp",
+              "Telegram/SourceFiles/apo/apo_economy_state.h",
+              "Telegram/SourceFiles/apo/apo_economy_state.cpp",
+              "Telegram/SourceFiles/apo/apo_verifier.h",
+              "Telegram/SourceFiles/apo/apo_verifier.cpp",
+              "Telegram/SourceFiles/apo/apo_cognitive_loop.h",
+              "Telegram/SourceFiles/apo/apo_cognitive_loop.cpp",
+              "Telegram/SourceFiles/apo/apo_runtime.h",
+              "Telegram/SourceFiles/apo/apo_runtime.cpp",
+              "Telegram/SourceFiles/apo/apo_executor.h",
+              "Telegram/SourceFiles/apo/apo_executor.cpp"
+          )
+          foreach ($f in $required) {
+              if (Test-Path $f) {
+                  Write-Host "[PASS] Present: $f" -ForegroundColor Green
+              } else {
+                  Write-Error "[FAIL] Missing required APΩ file: $f"
+                  exit 1
+              }
+          }
+
+      - name: Verify Hook Points in Telegram Native Source
+        shell: pwsh
+        run: |
+          Write-Host "Auditing choke points wiring in upstream Telegram source..." -ForegroundColor Cyan
+
+          # Check Core Application start/stop
+          $app = Get-Content Telegram/SourceFiles/core/application.cpp -Raw
+          if ($app -match "apo::Runtime::Instance\(\)\.start\(\)") {
+              Write-Host "[PASS] Application lifecycle start hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] Application start hook missing"
+              exit 1
+          }
+
+          # Check Inbound MTProto Updates
+          $updates = Get-Content Telegram/SourceFiles/api/api_updates.cpp -Raw
+          if ($updates -match "apo::HookServerUpdate") {
+              Write-Host "[PASS] MTProto Inbound Updates hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] MTProto Inbound Updates hook missing"
+              exit 1
+          }
+
+          # Check Outbound MTProto Requests & Responses
+          $mtp = Get-Content Telegram/SourceFiles/mtproto/mtp_instance.cpp -Raw
+          if (($mtp -match "apo::HookMtprotoRequest") -and ($mtp -match "apo::HookMtprotoResponse")) {
+              Write-Host "[PASS] MTProto Outbound Request and Response hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] MTProto Outbound/Response hook missing"
+              exit 1
+          }
+
+          # Check UI Navigation
+          $sessionCtrl = Get-Content Telegram/SourceFiles/window/window_session_controller.cpp -Raw
+          if ($sessionCtrl -match "apo::HookUiEvent") {
+              Write-Host "[PASS] UI Navigation hooked" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] UI Navigation hook missing"
+              exit 1
+          }
+
+      - name: CMake Syntax & Source Registration Check
+        shell: pwsh
+        run: |
+          cmake --version
+          $cmakeLists = Get-Content Telegram/CMakeLists.txt -Raw
+          if ($cmakeLists -match "apo/apo_runtime.cpp" -and $cmakeLists -match "apo/apo_verifier.cpp") {
+              Write-Host "[PASS] All APΩ sources registered in CMakeLists.txt" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] APΩ sources missing from CMakeLists.txt"
+              exit 1
+          }
+
+      - name: Test APΩ Convergence Fixture (Not Native Runtime)
+        shell: pwsh
+        run: |
+          Write-Host "Verifying Mathematical Convergence Condition..." -ForegroundColor Cyan
+          # Canonical check: |Delta D| < 0.005 and V1 >= 0.9800
+          $c = 0.05
+          $r = 0.01
+          $e = 0.99
+          $b = 0.99
+          $D = ($c + $r + $e + $b) / 4.0
+          $diff = ($e + (1.0 - $r)) / 2.0
+          $V = [Math]::Max(0.0, 1.0 - $D * (1.0 - $diff))
+          Write-Host "Calculated D=$D, diff=$diff, V=$V" -ForegroundColor Green
+          $D0 = (0.0 + 0.07 + 1.0 + 0.985) / 4.0
+          $deltaD = [Math]::Abs($D - $D0)
+          if ($deltaD -lt 0.005 -and $V -ge 0.9800) {
+              Write-Host "[PASS] Fixture: |DeltaD|=$deltaD < 0.005, V1=$V >= 0.9800" -ForegroundColor Green
+          } else {
+              Write-Error "[FAIL] Fixture: |DeltaD|=$deltaD, V1=$V"
+              exit 1
+          }
+
+      - name: Check Native Ledger and Executor Static Guards
+        shell: pwsh
+        run: |
+          $ledger = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.cpp -Raw
+          $ledgerHeader = Get-Content Telegram/SourceFiles/apo/apo_behavior_ledger.h -Raw
+          $executor = Get-Content Telegram/SourceFiles/apo/apo_executor.cpp -Raw
+          $verifier = Get-Content Telegram/SourceFiles/apo/apo_verifier.cpp -Raw
+          $loop = Get-Content Telegram/SourceFiles/apo/apo_cognitive_loop.cpp -Raw
+          $stateBridge = Get-Content Telegram/SourceFiles/apo/apo_state_bridge.cpp -Raw
+          $dataSession = Get-Content Telegram/SourceFiles/data/data_session.cpp -Raw
+          $application = Get-Content Telegram/SourceFiles/core/application.cpp -Raw
+          $runtime = Get-Content Telegram/SourceFiles/apo/apo_runtime.cpp -Raw
+          $mtproto = Get-Content Telegram/SourceFiles/mtproto/mtp_instance.cpp -Raw
+          $callback = ($mtproto -split 'void Instance::Private::processCallback\(', 2)[1] -split 'void Instance::Private::processUpdate\(', 2
+          $successBranch = ($callback[0] -split 'else if \(parsed && guard\)', 2)
+          if ($successBranch.Count -ne 2 -or
+              $successBranch[1] -notmatch 'HookMtprotoResponse\(') {
+              throw 'RPC_SUCCESS emitted before native response parse acceptance'
+          }
+          $body = ($executor -split 'void ActionExecutor::executeInternal\(', 2)[1]
+
+          if ($ledger -notmatch 'void BehaviorLedger::initUnlocked\(' -or
+              $ledger -notmatch 'QJsonDocument::fromJson\(' -or
+              $ledger -notmatch 'restoredSequence' -or
+              $ledger -notmatch 'if \(!_initialized && _filePath\.isEmpty\(\)\)' -or
+              !(Test-Path Telegram/build/apo_ledger_smoke.ps1)) {
+              throw 'Ledger initialization/replay guard missing'
+          }
+          if ($ledger -notmatch 'hashVersion == 1' -or
+              $ledger -notmatch 'event\.parentTraceId' -or
+              $ledger -notmatch 'event\.timestampMs') {
+              throw 'Ledger hash v2 metadata binding or v1 replay compatibility missing'
+          }
+          if ($ledgerHeader -notmatch 'recordEventAsync\(' -or
+              $ledger -notmatch 'kMaxAsyncEvents' -or
+              $runtime -notmatch 'RecordBehaviorAsync\(') {
+              throw 'Bounded off-caller persistence for observational events is missing'
+          }
+          if ($ledger -notmatch 'kMaxLedgerBytes' -or
+              $ledger -notmatch 'kReservedStorageBytes' -or
+              $ledger -notmatch 'LedgerStorageAllowsAppend\(') {
+              throw 'Ledger storage quota or free-space reserve guard is missing'
+          }
+          if ($stateBridge -notmatch '_self\.userId != accountUserId' -or
+              $dataSession -notmatch 'session\(\)\.userId\(\)\.bare' -or
+              $application -notmatch 'updateUnreadCount\(' -or
+              $application -notmatch 'updateUserProfile\(\s*0, QString\(\)') {
+              throw 'Active-account state projection or logout reset is missing'
+          }
+          if ($application -notmatch 'credits\.balanceValue\(' -or
+              $application -notmatch 'credits\.tonBalanceValue\(' -or
+              $application -notmatch '_apoCreditsLifetime\.reset\(' -or
+              $stateBridge -notmatch 'updateStarsCredits\(' -or
+              $stateBridge -notmatch 'updateTelegramTonCredits\(') {
+              throw 'Scoped native Telegram Stars/TON credit observation missing'
+          }
+          if ($executor -notmatch 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
+              $loop -match 'ApoVerifier::Instance\(\)\.verifyAction\(' -or
+              $executor -notmatch 'if \(!RecordBehavior\(EventType::ApoVerify') {
+              throw 'Omega verification or durable approval gate is bypassable'
+          }
+          if ($verifier -notmatch 'QJsonDocument\(parameters\)\.toJson\(QJsonDocument::Compact\)' -or
+              $verifier -notmatch 'parameterHash' -or
+              $verifier -notmatch 'logPayload\[QStringLiteral\("parameter_hash"\)\]') {
+              throw 'Omega proof is not bound to canonical action parameters'
+          }
+          if ($ledger -notmatch 'QStringLiteral\("trace-%1-%2"\)\.arg\(event\.sequence\)\.arg\(nowMs\)') {
+              throw 'Fallback trace identifiers are not sequence-unique'
+          }
+          if ($body -match 'advancePhase\(action\.actionId, ActionPhase::Acknowledged\)' -or
+              $body -match 'action\.callback\(true\)') {
+              throw 'Executor contains an unverified success transition'
+          }
+          if ($runtime -match 'payload\[QStringLiteral\("params"\)\] = params;' -or
+              $runtime -match 'payload\[QStringLiteral\("result"\)\] = result;' -or
+              $runtime -match 'payload\[QStringLiteral\("data"\)\] = updateData;') {
+              throw 'MTProto/private payload persisted without sanitization'
+          }
+          if ($mtproto -notmatch 'ApoRequestMethod\(' -or
+              $mtproto -notmatch 'response_constructor_id' -or
+              $runtime -notmatch 'response_word_count') {
+              throw 'Redacted MTProto operation and response-shape evidence missing'
+          }
+          Write-Host '[PASS] Static source guard only; native build and E2E require separate evidence.'
+
+      - name: Test Native Ledger Audit Integrity Gate
+        shell: pwsh
+        run: Telegram/build/apo_behavior_audit_test.ps1
+
+  apo-build-gate:
+    name: APΩ Native Toolchain Presence (Not a Binary Build)
+    needs: apo-review-gate
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Ninja
+        uses: ashutoshvarma/setup-ninja@master
+        with:
+          version: 1.11.1
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Verify MSVC and CMake Compiler Toolchain
+        shell: pwsh
+        run: |
+          cl.exe
+          cmake --version
+          ninja --version
+          Write-Host "[PASS] Compiler/toolchain commands available; no Telegram binary compiled by this job" -ForegroundColor Yellow

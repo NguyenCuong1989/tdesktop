@@ -1,9 +1,9 @@
-#define MyAppShortName "Telegram"
-#define MyAppName "Telegram Desktop"
-#define MyAppPublisher "Telegram FZ-LLC"
-#define MyAppURL "https://desktop.telegram.org"
+#define MyAppShortName "Omega Telegram"
+#define MyAppName "Omega Telegram Desktop"
+#define MyAppPublisher "Omega Telegram Project"
+#define MyAppURL "https://github.com/NguyenCuong1989/tdesktop"
 #define MyAppExeName "Telegram.exe"
-#define MyAppId "53F49750-6209-4FBF-9CA8-7A333C87D1ED"
+#define MyAppId "93F4F161-15B4-5FB2-AAF7-EC18A453E81E"
 #define CurrentYear GetDateTimeString('yyyy','','')
 
 [Setup]
@@ -22,7 +22,7 @@ DefaultDirName={userappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir={#ReleasePath}
-SetupIconFile={#SourcePath}..\Resources\art\icon256.ico
+SetupIconFile={#SourcePath}..\Resources\art\omega_icon256.ico
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\Telegram.exe
 Compression=lzma
