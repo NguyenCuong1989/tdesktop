@@ -113,8 +113,8 @@ try {
                 ''
             }
             $canonicalBytes = [Text.Encoding]::UTF8.GetBytes($canonical)
-            $expectedHash = [Convert]::ToHexString(
-                $sha256.ComputeHash($canonicalBytes)).ToLowerInvariant()
+            $expectedHash = [BitConverter]::ToString(
+                $sha256.ComputeHash($canonicalBytes)).Replace('-', '').ToLowerInvariant()
             if ($current -ne $expectedHash) { $totals.sha256Errors++ }
             $lastSequence = $sequence
             $lastHash = $current

@@ -31,8 +31,9 @@ function New-LedgerEvent(
     }
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {
-        $hash = [Convert]::ToHexString($sha256.ComputeHash(
-            [Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
+        $hash = [BitConverter]::ToString($sha256.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($canonical))).Replace(
+                '-', '').ToLowerInvariant()
     } finally {
         $sha256.Dispose()
     }
