@@ -1,3 +1,5 @@
+> **Ω-Telegram MISSION LOCK — mandatory before all work:** Read `docs/omega-telegram-mission-lock.md` (from repository root) and follow its fixed A→B→C→D gates. Current body is NOT ACCEPTED. Do not introduce LLM, external controllers, parallel runtime or claim unverified PASS.
+
 # APΩ Telegram Desktop Development Workflow
 
 This fork treats the modified Telegram Desktop source itself as the agent product. The repository must remain a normal, persistent Git repository with a clean upstream relationship; no temporary copy is canonical.

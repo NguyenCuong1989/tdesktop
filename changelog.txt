@@ -1,3 +1,5 @@
+2026-10-25 — Ω-Telegram MISSION LOCK (2026-10-25): Added docs/omega-telegram-mission-lock.md; linked mandatory preflight from AGENTS.md, CLAUDE.md, GROK.md, development workflow and next-session checklist. Fixed one native body, APΩ unconditional sensing/reflex, LLM conditional only after BodyPASS, evidence-based lifecycle, A→B→C→D gates and anti-drift handoff. Documentation-only; BODY UNDER CONSTRUCTION — NOT ACCEPTED.
+
 7.3.1 (09.10.26)
 
 - Fix wallet encryption with Windows Hello sometimes failing.
