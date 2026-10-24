@@ -27,6 +27,18 @@ void StateBridge::updateUserProfile(
 		_self = SelfState();
 		_bodyProjection.reset();
 	}
+	// Account profile fields (especially phone) must not enter raw telemetry.
+	QJsonObject safeProfile;
+	safeProfile[QStringLiteral("profile_updated")] = true;
+	safeProfile[QStringLiteral("has_identity")] = (userId != 0);
+	safeProfile[QStringLiteral("is_premium")] = isPremium;
+	if (!RecordBehavior(
+		EventType::StateReduce,
+		QString(),
+		QStringLiteral("apo.state_bridge"),
+		safeProfile)) {
+		return;
+	}
 	_self.userId = userId;
 	_self.username = username;
 	_self.phone = phone;
@@ -34,17 +46,6 @@ void StateBridge::updateUserProfile(
 	_self.lastName = lastName;
 	_self.isPremium = isPremium;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
-
-	// Account profile fields (especially phone) must not enter raw telemetry.
-	QJsonObject safeProfile;
-	safeProfile[QStringLiteral("profile_updated")] = true;
-	safeProfile[QStringLiteral("has_identity")] = (userId != 0);
-	safeProfile[QStringLiteral("is_premium")] = isPremium;
-	RecordBehavior(
-		EventType::StateReduce,
-		QString(),
-		QStringLiteral("apo.state_bridge"),
-		safeProfile);
 }
 
 void StateBridge::updateUnreadCount(int64 accountUserId, int unreadTotal) {
@@ -53,21 +54,32 @@ void StateBridge::updateUnreadCount(int64 accountUserId, int unreadTotal) {
 		|| unreadTotal < 0 || _self.unreadTotal == unreadTotal) {
 		return;
 	}
-	_self.unreadTotal = unreadTotal;
-	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
-
 	QJsonObject payload;
 	payload[QStringLiteral("unread_total")] = unreadTotal;
-	RecordBehavior(
+	if (!RecordBehavior(
 		EventType::StateReduce,
 		QString(),
 		QStringLiteral("apo.state_bridge.unread"),
-		payload);
+		payload)) {
+		return;
+	}
+	_self.unreadTotal = unreadTotal;
+	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
 }
 
 void StateBridge::updateBalances(int64 accountUserId, int64 tonBalanceNano, int64 starsBalance) {
 	QMutexLocker locker(&_mutex);
 	if (!accountUserId || _self.userId != accountUserId) {
+		return;
+	}
+	QJsonObject payload;
+	payload[QStringLiteral("ton_wallet_balance_updated")] = true;
+	payload[QStringLiteral("stars_balance_updated")] = true;
+	if (!RecordBehavior(
+		EventType::StateReduce,
+		QString(),
+		QStringLiteral("apo.state_bridge.balances"),
+		payload)) {
 		return;
 	}
 	_self.tonBalanceNano = tonBalanceNano;
@@ -76,15 +88,6 @@ void StateBridge::updateBalances(int64 accountUserId, int64 tonBalanceNano, int6
 	_self.starsBalanceNano = 0;
 	_self.starsBalanceKnown = true;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
-
-	QJsonObject payload;
-	payload[QStringLiteral("ton_wallet_balance_updated")] = true;
-	payload[QStringLiteral("stars_balance_updated")] = true;
-	RecordBehavior(
-		EventType::StateReduce,
-		QString(),
-		QStringLiteral("apo.state_bridge.balances"),
-		payload);
 }
 
 void StateBridge::updateStarsCredits(
@@ -101,15 +104,17 @@ void StateBridge::updateStarsCredits(
 		&& _self.starsBalanceNano == nano) {
 		return;
 	}
+	QJsonObject payload;
+	payload[QStringLiteral("source")] = QStringLiteral("telegram_credits_stars");
+	payload[QStringLiteral("balance_loaded")] = true;
+	if (!RecordBehavior(EventType::StateReduce, QString(),
+		QStringLiteral("apo.state_bridge.stars"), payload)) {
+		return;
+	}
 	_self.starsBalance = whole;
 	_self.starsBalanceNano = nano;
 	_self.starsBalanceKnown = true;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
-	QJsonObject payload;
-	payload[QStringLiteral("source")] = QStringLiteral("telegram_credits_stars");
-	payload[QStringLiteral("balance_loaded")] = true;
-	RecordBehavior(EventType::StateReduce, QString(),
-		QStringLiteral("apo.state_bridge.stars"), payload);
 }
 
 void StateBridge::updateTelegramTonCredits(
@@ -126,15 +131,17 @@ void StateBridge::updateTelegramTonCredits(
 		&& _self.telegramTonNano == nano) {
 		return;
 	}
+	QJsonObject payload;
+	payload[QStringLiteral("source")] = QStringLiteral("telegram_credits_ton");
+	payload[QStringLiteral("balance_loaded")] = true;
+	if (!RecordBehavior(EventType::StateReduce, QString(),
+		QStringLiteral("apo.state_bridge.telegram_ton"), payload)) {
+		return;
+	}
 	_self.telegramTonWhole = whole;
 	_self.telegramTonNano = nano;
 	_self.telegramTonKnown = true;
 	_self.lastUpdatedMs = QDateTime::currentMSecsSinceEpoch();
-	QJsonObject payload;
-	payload[QStringLiteral("source")] = QStringLiteral("telegram_credits_ton");
-	payload[QStringLiteral("balance_loaded")] = true;
-	RecordBehavior(EventType::StateReduce, QString(),
-		QStringLiteral("apo.state_bridge.telegram_ton"), payload);
 }
 
 bool StateBridge::updateNativeBodyProjection(const NativeBodyProjection &projection) {
