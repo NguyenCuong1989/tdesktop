@@ -1,3 +1,5 @@
+2026-10-25 - Omega-Telegram Native Body source audit (NOT BodyPASS): Codex subagents examined native sensing and APΩ executor with source-line evidence. Updated docs/omega-telegram-mtproto-capability-coverage.md to separate upstream/schema coverage, APΩ source wiring, and observed runtime PASS. Uncommitted core/application.cpp input bridge change allows loaded zero Stars/TON balances to be forwarded; this is source-checked only, not native runtime verified. apo_behavior_audit_test.ps1 PASS and apo_ledger_smoke.ps1 PASS (scoped fixture/native ledger smoke, not Telegram body acceptance). Existing dirty APΩ work preserved. No LLM integration, no system PASS.
+
 2026-10-25 — Ω-Telegram MISSION LOCK (2026-10-25): Added docs/omega-telegram-mission-lock.md; linked mandatory preflight from AGENTS.md, CLAUDE.md, GROK.md, development workflow and next-session checklist. Fixed one native body, APΩ unconditional sensing/reflex, LLM conditional only after BodyPASS, evidence-based lifecycle, A→B→C→D gates and anti-drift handoff. Documentation-only; BODY UNDER CONSTRUCTION — NOT ACCEPTED.
 
 7.3.1 (09.10.26)
