@@ -17,6 +17,8 @@ Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram it
 - Reference Python suite is a reference/spec check only; never call it SYSTEM PASS.
 
 ## Gate 0 — Repository hygiene
+- [ ] For delegated work, apply the `Multi-agent collaboration work envelope` in `docs/apo-development-workflow.md`; reject missing mission mappings, inherited safety constraints, per-check measurements/logs/lineage, or individual outcomes.
+- [ ] Never delegate Phase D/LLM work without a recorded explicit full `BodyPASS`; the current body is **NOT ACCEPTED**.
 - [ ] Working tree clean before sync/build.
 - [ ] `git fetch upstream dev --prune`.
 - [ ] Confirm `apo/master` is based on current `upstream/dev`.
@@ -114,7 +116,7 @@ The controlling benchmark is telemetry, and telemetry must connect fork evolutio
 
 ## Mission execution contract and evidence checkpoint — 2026-10-19
 
-**Creator-defined invariant:** build the existing official Telegram Desktop native fork into Ω-Telegram, a fully functional Telegram client with APΩ/Telegram Economy mathematical engines and useful code-based autonomous features. No standalone bot, wrapper, replacement desktop, or new orchestrator. ChatGPT coordinates the existing tools; an LLM is optional and is never required for deterministic functions.
+**Historical Creator-defined invariant:** build the existing official Telegram Desktop native fork into Ω-Telegram, a fully functional Telegram client with APΩ/Telegram Economy mathematical engines and useful code-based autonomous features. No standalone bot, wrapper, replacement desktop, or new orchestrator. The historical statement that ChatGPT coordinates existing tools and an LLM is optional is superseded by the Mission Lock: Phase D/LLM work is forbidden until a recorded explicit full `BodyPASS`; the current body is **NOT ACCEPTED**.
 
 **Fixed evaluation chain:** Source → Build → Runtime → Native Telegram Action → Server ACK → Observed State → Ledger Replay → Measured User Value. A passing reference fixture, static guard, successful compile, or CI label is evidence for only its own level, never product completion.
 
