@@ -51,6 +51,12 @@ Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram it
 
 ## Gate 4 — Real telemetry baseline
 Every PASS below must include numbers.
+- [ ] PTS direct path: prove one accepted update returns from its native handler and records account-scoped `PTS_HANDLER_RETURNED` exactly once.
+- [ ] PTS queued path: prove a gapped update remains unreported until drain, then records account-scoped `PTS_HANDLER_RETURNED` exactly once.
+- [ ] PTS duplicate path: prove a duplicate/stale update does not create another handler-return event.
+- [ ] PTS gap handling: prove the missing range is recovered or remains explicitly pending without false application evidence.
+- [ ] PTS drain: prove multiple queued entries drain safely, in order, without iterator invalidation or cross-account attribution.
+- [ ] Distinguish SOURCE + MSVC BUILD + isolated unauthenticated restart (2026-10-25, SHA-256 `D62FDE97A223A0676420DA0C0B39693D682AC5CBFA3E4BBD87BECB4151434D2D`, ledger 77 valid events) from **NOT_RUN** authenticated direct/queued PTS, cross-account and native model-state postconditions. The queue-safety patch is source-reviewed but does not pass these runtime gates.
 - [ ] Native lifecycle events captured: expected / captured / missing / duplicate.
 - [ ] MTProto requests: total, response match rate, errors, orphan request IDs.
 - [ ] MTProto latency: p50/p95/p99.
