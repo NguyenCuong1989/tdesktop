@@ -43,6 +43,7 @@ Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram it
 
 ## Gate 3 — Launch as Ω-Telegram
 - [ ] Launch the fork binary, not the Microsoft Store Telegram binary.
+- [ ] Before and after any updater or restart, verify the protected fork binary SHA is unchanged, the relaunched process uses that same binary, APΩ runtime/ledger resumes, and no official Telegram update is installed. Any hash mismatch is `BLOCKED/FAIL`; passing this check is native build/restart evidence only, never whole `BodyPASS`.
 - [ ] Use a separate/controlled data directory first; do not modify or copy authentication secrets blindly.
 - [ ] Login/session works.
 - [ ] Dialog list, chats, groups, channels, bots, media, search, settings and normal Telegram UX still work.

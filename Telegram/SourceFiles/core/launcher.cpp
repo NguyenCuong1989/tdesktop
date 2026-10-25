@@ -458,6 +458,8 @@ bool Launcher::validateCustomWorkingDir() {
 void Launcher::workingFolderReady() {
 	srand((unsigned int)time(nullptr));
 
+	// A foreign official update must not replace the native AP Omega body.
+	SetUpdaterDisabledAtStartup();
 	ComputeDebugMode();
 	ComputeExternalUpdater();
 	ComputeInstallBetaVersions();
