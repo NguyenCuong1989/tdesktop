@@ -8,32 +8,88 @@ $relative='Telegram/SourceFiles/test/test_scenario.cpp'
 $slot=Join-Path $repo 'Telegram\SourceFiles\test\test_scenario.cpp'
 $scenario=Join-Path $PSScriptRoot 'apo_native_ui_smoke_scenario.cpp'
 $vcvars='C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
-$binary=Join-Path $repo 'out\Debug\Telegram.exe'
+$project=Join-Path $repo 'out\Telegram\Telegram.vcxproj'
 $fixture=Join-Path $repo 'out\apo_native_ui_smoke_fixture'
-$evidence=Join-Path $fixture 'test_evidence'
+$runDir=Join-Path $fixture ('run-'+[Guid]::NewGuid().ToString('N'))
+$binaryDir=Join-Path $runDir 'bin'
+$binary=Join-Path $binaryDir 'Telegram.exe'
+$profile=Join-Path $runDir 'profile'
+$skipReferences=Join-Path $runDir 'skip_project_references.targets'
+$evidence=Join-Path $runDir 'test_evidence'
 $testLog=Join-Path $evidence 'test_log.txt'
-$buildLog=Join-Path $repo 'out\apo_native_ui_smoke_overlay_build.log'
-$restoreLog=Join-Path $repo 'out\apo_native_ui_smoke_restored_build.log'
-$backup=Join-Path $repo 'out\apo_native_ui_smoke_original.cpp'
+$buildLog=Join-Path $runDir 'overlay_build.log'
+$restoreLog=Join-Path $runDir 'restored_build.log'
+$backup=Join-Path $runDir 'original_test_scenario.cpp'
 
-if(!(Test-Path $scenario) -or !(Test-Path $vcvars)){throw 'Missing scenario source or MSVC toolchain'}
-& git -C $repo diff --quiet -- $relative
-if($LASTEXITCODE -ne 0){throw 'Uncommitted changes in upstream test scenario'}
+if(!(Test-Path $scenario) -or !(Test-Path $vcvars) -or !(Test-Path $project)){
+    throw 'Missing scenario source, generated Telegram.vcxproj, or MSVC toolchain'
+}
+if(@(Get-Process MSBuild -ErrorAction SilentlyContinue).Count -ne 0){
+    throw 'Another MSBuild process is active; refusing to start a competing build'
+}
+& git -C $repo diff --quiet HEAD -- $relative
+if($LASTEXITCODE -ne 0){
+    throw 'Indexed or working-tree changes in upstream test scenario'
+}
 if(!([IO.File]::ReadAllText($slot)).Contains('The repository copy must stay a no-op.')){
     throw 'Unexpected test_scenario.cpp contents'
 }
 $original=[IO.File]::ReadAllBytes($slot)
-[IO.File]::WriteAllBytes($backup,$original)
-$originalHash=(Get-FileHash $backup -Algorithm SHA256).Hash
+$originalHash=(Get-FileHash $slot -Algorithm SHA256).Hash
+$scenarioHash=(Get-FileHash $scenario -Algorithm SHA256).Hash
 $head=(& git -C $repo rev-parse HEAD).Trim()
-[IO.Directory]::CreateDirectory($fixture)|Out-Null
-[IO.File]::WriteAllText((Join-Path $fixture 'testing'),'disposable product test',[Text.UTF8Encoding]::new($false))
+if(Test-Path -LiteralPath $fixture){
+    $fixtureItem=Get-Item -LiteralPath $fixture -Force
+    if(!$fixtureItem.PSIsContainer -or
+            (($fixtureItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){
+        throw 'Fixture root is not a regular directory'
+    }
+} else {
+    [IO.Directory]::CreateDirectory($fixture)|Out-Null
+}
+if(Test-Path -LiteralPath $runDir){throw 'Generated run directory already exists'}
+[IO.Directory]::CreateDirectory($runDir)|Out-Null
+$runItem=Get-Item -LiteralPath $runDir -Force
+if(($runItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+    throw 'Generated run directory is a reparse point'
+}
+[IO.File]::WriteAllBytes($backup,$original)
+if((Get-FileHash $backup -Algorithm SHA256).Hash -ne $originalHash){
+    throw 'Run-scoped backup does not match the original test scenario'
+}
+[IO.File]::WriteAllText($skipReferences,@'
+<Project>
+  <ItemGroup>
+    <ProjectReference Remove="@(ProjectReference)" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <MinimalRebuildFromTracking>false</MinimalRebuildFromTracking>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>
+'@,[Text.UTF8Encoding]::new($false))
+[IO.Directory]::CreateDirectory($profile)|Out-Null
+[IO.File]::WriteAllText((Join-Path $profile 'testing'),'disposable product test',[Text.UTF8Encoding]::new($false))
 
 function Build-Telegram([string]$logPath){
-    $line='call "'+$vcvars+'" -vcvars_ver=14.44 >nul && '+
-        'cmake --build "'+(Join-Path $repo 'out')+'" --config Debug '+
-        '--target Telegram --parallel 2 -- /p:CL_MPCount=3 /nr:false > "'+$logPath+'" 2>&1'
-    & cmd.exe /d /s /c $line
+    $outDir=($binaryDir -replace '\\','/')+'/'
+    $afterTargets=($skipReferences -replace '\\','/')
+    $properties='/m:1 /nr:false '+
+        '/p:Configuration=Debug /p:Platform=x64 '+
+        '/p:OutDir="'+$outDir+'" /p:BuildProjectReferences=false '+
+        '/p:CustomAfterMicrosoftCommonTargets="'+$afterTargets+'" '+
+        '/p:CL_MPCount=1'
+    $compileLine='call "'+$vcvars+'" -vcvars_ver=14.44 >nul && '+
+        'MSBuild.exe "'+$project+'" /t:ClCompile '+$properties+
+        ' > "'+$logPath+'" 2>&1'
+    & cmd.exe /d /s /c $compileLine
+    if($LASTEXITCODE -eq 0){
+        $linkLine='call "'+$vcvars+'" -vcvars_ver=14.44 >nul && '+
+        'MSBuild.exe "'+$project+'" /t:_Link '+$properties+
+        ' /p:ForceRebuild=true >> "'+$logPath+'" 2>&1'
+        & cmd.exe /d /s /c $linkLine
+    }
     if($LASTEXITCODE -ne 0){
         $tail=(Get-Content $logPath -Tail 22) -join [Environment]::NewLine
         throw ('Native Telegram build failed: '+[Environment]::NewLine+$tail)
@@ -46,16 +102,16 @@ try {
     [IO.File]::WriteAllBytes($slot,[IO.File]::ReadAllBytes($scenario))
     Build-Telegram $buildLog
     $binaryTestHash=(Get-FileHash $binary -Algorithm SHA256).Hash
-    $existing=@(Get-CimInstance Win32_Process -Filter "Name='Telegram.exe'"|
-        Where-Object {$_.CommandLine -like "*$fixture*"})
+    $existing=@(Get-Process Telegram -ErrorAction SilentlyContinue|
+        Where-Object {$_.Path -ieq $binary})
     if($existing.Count -ne 0){throw 'Disposable product test already running'}
     $env:TDESKTOP_TEST_EVIDENCE_DIR=$evidence
     $env:TDESKTOP_TEST_WATCHDOG=[string]([Math]::Min(120,$TimeoutSeconds))
-    $p=Start-Process -FilePath $binary -ArgumentList @('-workdir',$fixture,'-testagent','-noupdate','-debug') -WorkingDirectory (Split-Path $binary) -PassThru
+    $p=Start-Process -FilePath $binary -ArgumentList @('-workdir',$profile,'-testagent','-noupdate','-debug') -WorkingDirectory (Split-Path $binary) -PassThru
     $finished=$p.WaitForExit($TimeoutSeconds*1000)
     if(!$finished){
-        $check=Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)"
-        if($check -and $check.ExecutablePath -ieq $binary -and $check.CommandLine -like "*$fixture*"){
+        $check=Get-Process -Id $p.Id -ErrorAction SilentlyContinue
+        if($check -and $check.Path -ieq $binary){
             $p.CloseMainWindow()|Out-Null
             if(!$p.WaitForExit(4000)){Stop-Process -Id $p.Id -Force}
         }
@@ -93,17 +149,26 @@ try {
 } finally {
     Remove-Item Env:\TDESKTOP_TEST_EVIDENCE_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:\TDESKTOP_TEST_WATCHDOG -ErrorAction SilentlyContinue
-    [IO.File]::WriteAllBytes($slot,$original)
+    # Preserve unexpected concurrent edits instead of clobbering them.
+    $atRestoreHash=(Get-FileHash $slot -Algorithm SHA256).Hash
+    if($atRestoreHash -eq $scenarioHash){
+        [IO.File]::WriteAllBytes($slot,$original)
+    } elseif($atRestoreHash -ne $originalHash){
+        throw ("Test scenario changed concurrently; refusing overwrite. "+
+            "Original bytes preserved at: "+$backup)
+    }
     if((Get-FileHash $slot -Algorithm SHA256).Hash -ne $originalHash){
         throw 'Native test source was not exactly restored'
     }
     Build-Telegram $restoreLog
-    & git -C $repo diff --quiet -- $relative
+    & git -C $repo diff --quiet HEAD -- $relative
     if($LASTEXITCODE -ne 0){throw 'Restored source differs from Git HEAD'}
 }
 if(!$passed){throw 'Native product test did not PASS'}
-Write-Output ('PRODUCT_NATIVE_UI_PASS source='+$head+' test_binary_sha256='+$binaryTestHash)
-Write-Output ('NORMAL_BINARY_SHA256='+(Get-FileHash $binary -Algorithm SHA256).Hash)
+Write-Output ('PRODUCT_NATIVE_UI_PASS source='+$head+' scenario_source_sha256='+$scenarioHash+' test_binary_sha256='+$binaryTestHash)
+Write-Output ('RESTORED_SOURCE_SHA256='+$originalHash)
+Write-Output ('RESTORED_FIXTURE_BINARY_SHA256='+(Get-FileHash $binary -Algorithm SHA256).Hash)
+Write-Output ('RUN_DIRECTORY='+$runDir)
 Write-Output ('PRODUCT_TEST_EVIDENCE='+$testLog)
 Write-Output ('OVERLAY_BUILD_LOG='+$buildLog)
 Write-Output ('RESTORED_BUILD_LOG='+$restoreLog)

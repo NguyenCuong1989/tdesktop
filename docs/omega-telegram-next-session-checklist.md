@@ -16,6 +16,25 @@ Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram it
 - Action lifecycle types exist: PLANNED → VERIFIED → SENT → ACKNOWLEDGED → OBSERVED → CLOSED.
 - Reference Python suite is a reference/spec check only; never call it SYSTEM PASS.
 
+## Nghiệm thu cuốn chiếu theo chức năng — bằng chứng 25/10/2026
+
+Mỗi chức năng tiến từ SOURCE → BUILD → TEST → NATIVE → OBSERVED và chỉ được CLOSED khi kết quả bản địa khớp điều kiện đã xác lập. Các trạng thái dưới đây **không** đồng nghĩa `BodyPASS`; bằng chứng quá khứ không tự động chuyển thành PASS cho binary/phiên hiện tại.
+
+| Chức năng / cơ quan | Mức bằng chứng đã đạt | Cổng chưa đạt |
+| --- | --- | --- |
+| Khởi động native + cửa sổ + mở QR đăng nhập | `-testagent` trên binary staging riêng: **23 TEST_RESULT PASS**, `SCENARIO_RESULT: PASS (failures: 0)`, APΩ chạy trong tiến trình, test source được khôi phục nguyên byte, PID Telegram cũ không bị tác động. | Đăng nhập tài khoản thật, duy trì phiên và sử dụng đầy đủ UI sau đăng nhập: NOT_RUN |
+| MTProto request/response không xác thực | Binary SHA-256 `FFB97948BF43B8F43501138013C524AC3E91696E4A23AED127FFD108CC2A60A7`: 7 request, 5 response đối chiếu cùng request ID, 2 request chưa trả lời lúc đóng test; 23 ledger events, 0 parse/sequence/hash/link errors. | Các request chưa hồi đáp là pending, authenticated domains và hậu điều kiện còn NOT_RUN |
+| Đọc `messages.getDialogs` trên tài khoản | **HISTORICAL OBSERVED** 23/10: 14 vòng có ACK → native state match 16/16 → `STATE_CONFIRMED` → `CLOSED` theo cùng action/request ID. | Không được dùng kết quả lịch sử làm chứng cứ phiên 25/10: StateBridge ledger hiện `has_user_identity=false`; tái nghiệm thu trên binary mới BLOCKED |
+| PTS nhận, xếp hàng, chống trùng, tái nhập | MSVC BUILD+TEST **11/11 PASS** biên dịch chính `data_pts_waiter.cpp` và `base::flat_map` gốc; 100 hoán vị có seed cố định, 3.200 callback kiểm tra đúng thứ tự/không trùng. Copilot `ACCEPT_TEST_SOURCE`. | Authenticated Api::Updates → Data::Session → RAW ledger/cross-account còn NOT_RUN |
+| Thông báo thay đổi Peer/History/Message/Entry/Topic/Sublist/Story | SOURCE và MSVC BUILD PASS; bảy số đếm đã khử nội dung, guard theo tài khoản, bản staged như trên đã thử crash/restart cách ly. | Nonzero events từng cơ quan, reentrant logout, đo burst và state thật còn NOT_RUN |
+| Gửi `messages.send_text` | Đang có source path và ledger lifecycle, **chưa đạt native test**; không gửi tin tới người dùng thật trong cuộc nghiệm thu không có đích được ủy quyền. | Cần native send mechanism, random_id ↔ optimistic item ↔ ACK ↔ observed postcondition; chống gửi trùng/unknown outcome |
+
+**Dòng bằng chứng native UI cuối:** `apo_native_ui_smoke.ps1` runner SHA-256 `3D5E58018A305F000C7CF51B08F58DD61C29BC58E4BCEBCDA8439BBDA060EDF3`, scenario nguồn SHA-256 `87DACA5751B0751CB149DE06294D1EEDEC682CF5962B10ACC0D992E3647C09D7`, binary overlay SHA-256 `A00A40DE2C8B370E21E3C38FA41823486AC81EE0A81335F5D1BB69DE8B24D50F`, restore source SHA-256 `CD6FAB91823BE06066B9002268A0C4A480D411AD2EF235C7A22D02931718122D`; full script exit 0, 23/23 native test assertions PASS; `test_scenario.cpp` khôi phục đúng HEAD. Test profile/evidence run-scoped GUID ở `out/apo_native_ui_smoke_fixture/run-74624df057604ff8a4693031efabbca3`, không dùng profile thật, không xóa đệ quy, không ghi đè thay đổi đồng thời.
+
+**Độ tin cậy của lịch sử:** full `apo_behavior_audit.ps1 -MaxEvents 700000` trên profile hiện hữu kiểm tra **635.050** bản ghi, exit 0, lỗi parse/sequence/hash/link đều bằng 0. Đây là PASS cho tính toàn vẹn ledger, không phải PASS cho tất cả hành vi.
+
+**PTS counterexample — chưa đóng cổng:** chạy executable test-only với `--probe-reentrant-arrival` (biên dịch source PTS gốc) đo `apply=11,14,12,13`, `current=13`, `PTS_HANDLER_RETURNED=14,11,12,13`, probe **exit 1** theo thiết kế. 11 ca kiểm thử mặc định vẫn PASS. Đây là `SOURCE/TEST BEHAVIORAL HAZARD` khi callback nhận lồng một PTS mới trong lúc drain; chưa có bằng chứng tình huống này phát sinh ở runtime native thật. Không tự sửa công thức APΩ hay thay PtsWaiter upstream khi chưa chứng minh đường gọi native thực tế. Bước kế: trace native `Api::Updates::applyUpdateNoPtsCheck()` có thể tái nhập cùng waiter hay không, rồi thêm phép thử trong `-testagent` nếu thật sự khả thi.
+
 ## Gate 0 — Repository hygiene
 - [ ] For delegated work, apply the `Multi-agent collaboration work envelope` in `docs/apo-development-workflow.md`; reject missing mission mappings, inherited safety constraints, per-check measurements/logs/lineage, or individual outcomes.
 - [ ] Never delegate Phase D/LLM work without a recorded explicit full `BodyPASS`; the current body is **NOT ACCEPTED**.
