@@ -57,6 +57,9 @@ Every PASS below must include numbers.
 - [ ] PTS gap handling: prove the missing range is recovered or remains explicitly pending without false application evidence.
 - [ ] PTS drain: prove multiple queued entries drain safely, in order, without iterator invalidation or cross-account attribution.
 - [ ] Distinguish SOURCE + MSVC BUILD + isolated unauthenticated restart (2026-10-25, SHA-256 `D62FDE97A223A0676420DA0C0B39693D682AC5CBFA3E4BBD87BECB4151434D2D`, ledger 77 valid events) from **NOT_RUN** authenticated direct/queued PTS, cross-account and native model-state postconditions. The queue-safety patch is source-reviewed but does not pass these runtime gates.
+- [ ] Native `Data::Changes` batch hook: verify exactly one `MODEL_NOTIFICATIONS_FLUSHED` marker **after** seven batched notification streams, no marker on no-op and separate follow-up flushes for reentrant updates; no assumption this means `MODEL_STATE_CONFIRMED`.
+- [ ] Account and lifecycle safety of native model-change hook: active session matches source, no cross-account attribution, no crash on empty domain/logout or queued callback after stop, no plaintext peer/message/story identifiers in ledger.
+- [ ] Burst/backpressure gate: measure model-notification flush count, queued ledger admission vs durable writes, dropped/rejected events, 250ms wake coalescing, CPU/latency and failure recovery; do not mark as native PASS from unauthenticated startup alone.
 - [ ] Native lifecycle events captured: expected / captured / missing / duplicate.
 - [ ] MTProto requests: total, response match rate, errors, orphan request IDs.
 - [ ] MTProto latency: p50/p95/p99.
