@@ -24,6 +24,7 @@ Do not use real Telegram sessions or require live network access.
 #include <QtCore/QFile>
 #include <QtCore/QDir>
 #include <QtCore/QDateTime>
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QSet>
@@ -261,8 +262,25 @@ void SetupScenario(not_null<Runner*> runner) {
             Check(admitted,
                 u"synthetic sensory producer event is durably admitted"_q);
             if (!admitted) return;
+            // Reproduce two source-account wakes before the 250 ms timer
+            // fires. The old scope must be durably marked unresolved before
+            // the anonymous scope replaces it; neither can dispatch.
+            const auto oldTrace = u"fixture_old_account_pending"_q;
+            const auto admittedOld = apo::RecordBehavior(
+                apo::EventType::UiEvent, oldTrace,
+                u"apo.test.synthetic_sensory_ingress"_q,
+                QJsonObject{{QStringLiteral("kind"),
+                    QStringLiteral("SYNTHETIC_ACCOUNT_SWITCH_STIMULUS")}});
+            Check(admittedOld,
+                u"old account source event was persisted before scope switch"_q);
+            if (!admittedOld) return;
+            loop.requestWake(u"fixture_old_account_signal"_q,
+                oldTrace, QDateTime::currentMSecsSinceEpoch(), 990321);
+            const auto beforeSwitch = apo::BehaviorLedger::Instance().totalEvents();
             loop.requestWake(u"fixture_pending_signal"_q,
                 sourceTrace, QDateTime::currentMSecsSinceEpoch(), 0);
+            Check(apo::BehaviorLedger::Instance().totalEvents() == beforeSwitch + 1,
+                u"account switch durably records the pending prior-account wake"_q);
             std::thread worker([] {
                 apo::Runtime::Instance().onMtprotoResponse(
                     89000241,
@@ -283,6 +301,10 @@ void SetupScenario(not_null<Runner*> runner) {
             if (!opened) return;
             QSet<QString> earlierTraces;
             auto pendingCount = 0;
+            auto switchedCount = 0;
+            auto switchedCorrect = false;
+            auto switchedSequence = qint64(-1);
+            auto oldSourceSequence = qint64(-1);
             auto pendingSequence = qint64(-1);
             auto sealSequence = qint64(-1);
             auto pendingHasRealParent = false;
@@ -316,9 +338,38 @@ void SetupScenario(not_null<Runner*> runner) {
                         && actor == u"apo.test.synthetic_sensory_ingress"_q) {
                     sourceSequence = sequence;
                 }
+                if (trace == oldTrace
+                        && actor == u"apo.test.synthetic_sensory_ingress"_q) {
+                    oldSourceSequence = sequence;
+                }
+                if (actor == u"apo.cognitive.sensory_wake"_q
+                        && payload.value(QStringLiteral("result")).toString()
+                            == u"NOT_REPLAYED_ACCOUNT_SWITCH_NO_ACTION"_q) {
+                    ++switchedCount;
+                    switchedSequence = sequence;
+                    const auto oldScope = QString::fromUtf8(
+                        QCryptographicHash::hash(
+                            (QString::number(990321) + QStringLiteral("|")
+                                + cWorkingDir()).toUtf8(),
+                            QCryptographicHash::Sha256).toHex());
+                    switchedCorrect = earlierTraces.contains(oldTrace)
+                        && parent == oldTrace
+                        && payload.value(QStringLiteral("account_scope")).toString()
+                            == oldScope
+                        && payload.value(QStringLiteral("scope_kind")).toString()
+                            == u"source_account_at_admission"_q
+                        && !payload.contains(QStringLiteral("profile_scope"))
+                        && payload.value(QStringLiteral("phase")).toString()
+                            == u"PENDING"_q
+                        && payload.value(QStringLiteral("coalesced_events")).toInt() == 1
+                        && payload.value(QStringLiteral("sources")).toArray().contains(
+                            QJsonValue(QStringLiteral("fixture_old_account_signal")));
+                }
                 if (actor == u"apo.cognitive.sensory_wake"_q
                         && payload.value(QStringLiteral("kind")).toString()
-                            == u"NATIVE_SENSORY_WAKE_UNRESOLVED"_q) {
+                            == u"NATIVE_SENSORY_WAKE_UNRESOLVED"_q
+                        && payload.value(QStringLiteral("result")).toString()
+                            == u"NOT_REPLAYED_NO_ACTION"_q) {
                     ++pendingCount;
                     pendingSequence = sequence;
                     pendingHasRealParent = earlierTraces.contains(parent);
@@ -352,8 +403,13 @@ void SetupScenario(not_null<Runner*> runner) {
                 }
                 if (!trace.isEmpty()) earlierTraces.insert(trace);
             }
+            Check(switchedCount == 1 && switchedCorrect
+                    && oldSourceSequence > sourceSequence
+                    && switchedSequence > oldSourceSequence
+                    && pendingSequence > switchedSequence,
+                u"account switch keeps prior scoped wake and causal order without replay"_q);
             Check(pendingCount == 1 && pendingHasRealParent,
-                u"exactly one unresolved wake has an earlier durable producer"_q);
+                u"exactly one shutdown wake has an earlier durable producer"_q);
             Check(pendingContainsFixture && pendingCorrectScope,
                 u"pending marker preserves anonymous scope and fixture source"_q);
             Check(pendingCorrectStatus,

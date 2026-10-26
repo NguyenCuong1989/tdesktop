@@ -89,55 +89,60 @@ void CognitiveLoop::start(int intervalMs) {
 		payload);
 }
 
+bool CognitiveLoop::persistPendingWake(const QString &reason) {
+	if (_pendingWakeCount <= 0) {
+		return true;
+	}
+	// Accepted ingress is not automatically a processed reflex. Persist the
+	// abandoned account-bound wake before resetting or switching its owner.
+	QJsonObject pending;
+	pending[QStringLiteral("kind")] =
+		QStringLiteral("NATIVE_SENSORY_WAKE_UNRESOLVED");
+	pending[QStringLiteral("phase")] = QStringLiteral("PENDING");
+	pending[QStringLiteral("result")] = reason;
+	pending[QStringLiteral("sources")] =
+		QJsonArray::fromStringList(_pendingWakeSources);
+	pending[QStringLiteral("coalesced_events")] = _pendingWakeCount;
+	pending[QStringLiteral("first_source_trace_id")] =
+		_pendingWakeSourceTraceId;
+	pending[QStringLiteral("wait_age_ms")] = static_cast<qint64>(
+		std::max<int64>(0,
+			QDateTime::currentMSecsSinceEpoch() - _pendingWakeAdmittedAtMs));
+	if (_pendingWakeAccountUserId == 0) {
+		pending[QStringLiteral("scope_kind")] =
+			QStringLiteral("anonymous_profile");
+		pending[QStringLiteral("profile_scope")] = QString::fromUtf8(
+			QCryptographicHash::hash(
+				(QStringLiteral("anonymous|") + cWorkingDir()).toUtf8(),
+				QCryptographicHash::Sha256).toHex());
+	} else {
+		// Source identity is provenance, not a current-session assertion.
+		pending[QStringLiteral("scope_kind")] =
+			QStringLiteral("source_account_at_admission");
+		pending[QStringLiteral("account_scope")] = QString::fromUtf8(
+			QCryptographicHash::hash(
+				(QString::number(_pendingWakeAccountUserId)
+					+ QStringLiteral("|") + cWorkingDir()).toUtf8(),
+				QCryptographicHash::Sha256).toHex());
+	}
+	const auto traceId = QStringLiteral("wake-unresolved-%1-%2")
+		.arg(QDateTime::currentMSecsSinceEpoch())
+		.arg(++_wakeResolutionSequence);
+	return RecordBehavior(EventType::Computation, traceId,
+		QStringLiteral("apo.cognitive.sensory_wake"), pending,
+		_pendingWakeSourceTraceId);
+}
+
 void CognitiveLoop::stop(bool recordPendingWake) {
 	if (!_running) {
 		return;
 	}
-	// The ingress may already be durable while its 250 ms wake timer
-	// has not fired. Classify it honestly before orderly ledger seal.
-	// Never replay historical network activity or claim a reflex occurred.
-	if (recordPendingWake && _pendingWakeCount > 0) {
-		QJsonObject pending;
-		pending[QStringLiteral("kind")] =
-			QStringLiteral("NATIVE_SENSORY_WAKE_UNRESOLVED");
-		pending[QStringLiteral("phase")] = QStringLiteral("PENDING");
-		pending[QStringLiteral("result")] =
-			QStringLiteral("NOT_REPLAYED_NO_ACTION");
-		pending[QStringLiteral("sources")] =
-			QJsonArray::fromStringList(_pendingWakeSources);
-		pending[QStringLiteral("coalesced_events")] = _pendingWakeCount;
-		pending[QStringLiteral("first_source_trace_id")] =
-			_pendingWakeSourceTraceId;
-		pending[QStringLiteral("wait_age_ms")] = static_cast<qint64>(
-			std::max<int64>(0,
-				QDateTime::currentMSecsSinceEpoch() - _pendingWakeAdmittedAtMs));
-		if (_pendingWakeAccountUserId == 0) {
-			pending[QStringLiteral("scope_kind")] =
-				QStringLiteral("anonymous_profile");
-			pending[QStringLiteral("profile_scope")] = QString::fromUtf8(
-				QCryptographicHash::hash(
-					(QStringLiteral("anonymous|") + cWorkingDir()).toUtf8(),
-					QCryptographicHash::Sha256).toHex());
-		} else {
-			// The source account is historical provenance, NOT proof that
-			// this is still the active authenticated Telegram session.
-			pending[QStringLiteral("scope_kind")] =
-				QStringLiteral("source_account_at_admission");
-			pending[QStringLiteral("account_scope")] = QString::fromUtf8(
-				QCryptographicHash::hash(
-					(QString::number(_pendingWakeAccountUserId)
-						+ QStringLiteral("|") + cWorkingDir()).toUtf8(),
-					QCryptographicHash::Sha256).toHex());
-		}
-		const auto traceId = QStringLiteral("wake-stop-%1-%2")
-			.arg(_cycleCount)
-			.arg(QDateTime::currentMSecsSinceEpoch());
-		if (!RecordBehavior(EventType::Computation, traceId,
-					QStringLiteral("apo.cognitive.sensory_wake"), pending,
-					_pendingWakeSourceTraceId)) {
-			qWarning("APO pending wake could not be persisted on orderly stop");
-		}
+	// The ingress may already be durable while the wake timer has not fired.
+	if (recordPendingWake
+			&& !persistPendingWake(QStringLiteral("NOT_REPLAYED_NO_ACTION"))) {
+		qWarning("APO pending wake could not be persisted on orderly stop");
 	}
+
 	_running = false;
 	_lastRankingAccount = 0;
 	_lastRemoteInspectionAccount = 0;
@@ -185,9 +190,20 @@ void CognitiveLoop::requestWake(
 		return;
 	}
 	if (_pendingWakeCount && _pendingWakeAccountUserId != accountUserId) {
+		// Never silently discard the previous account's accepted sensory
+		// ingress or coalesce unrelated account evidence into one wake.
+		if (!persistPendingWake(
+				QStringLiteral("NOT_REPLAYED_ACCOUNT_SWITCH_NO_ACTION"))) {
+			qWarning("APO sensory account switch blocked: evidence unavailable");
+			stop(false); // Fail closed: no reflex from an unsealed prior scope.
+			return;
+		}
 		_pendingWakeCount = 0;
+		_pendingWakeAdmittedAtMs = 0;
+		_pendingWakeAccountUserId = 0;
 		_pendingWakeSources.clear();
-		_wakeTimer->start(250);
+		_pendingWakeSourceTraceId.clear();
+		_wakeTimer->stop();
 	}
 	if (!_pendingWakeCount) {
 		_pendingWakeAdmittedAtMs = admittedAtMs;

@@ -40,6 +40,7 @@ private:
 	CognitiveLoop(const CognitiveLoop &) = delete;
 	CognitiveLoop &operator=(const CognitiveLoop &) = delete;
 	void stepNow();
+	[[nodiscard]] bool persistPendingWake(const QString &reason);
 
 	bool _running = false;
 	std::unique_ptr<QTimer> _loopTimer;
@@ -57,6 +58,7 @@ private:
 	QStringList _activeWakeSources;
 	QString _activeWakeSourceTraceId;
 	int64 _cycleCount = 0;
+	int64 _wakeResolutionSequence = 0;
 	int64 _lastRankingAccount = 0;
 	int64 _lastRemoteInspectionAccount = 0;
 	int64 _lastRemoteInspectionAtMs = 0;
