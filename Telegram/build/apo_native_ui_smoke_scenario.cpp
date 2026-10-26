@@ -14,6 +14,7 @@ Do not use real Telegram sessions or require live network access.
 #include "apo/apo_executor.h"
 #include "apo/apo_cognitive_loop.h"
 #include <limits>
+#include <thread>
 #include "test/test_widgets.h"
 #include "intro/intro_widget.h"
 #include "intro/intro_qr.h"
@@ -22,6 +23,10 @@ Do not use real Telegram sessions or require live network access.
 #include "settings.h"
 #include <QtCore/QFile>
 #include <QtCore/QDir>
+#include <QtCore/QDateTime>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QSet>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QWidget>
 
@@ -236,6 +241,134 @@ void SetupScenario(not_null<Runner*> runner) {
                 });
             Check(receipt->first && !receipt->second,
                 u"unwired native dispatch must complete with failure not success"_q);
+        },
+    });
+    // Last test only: synthesize a durable sensory ingress, then stop
+    // the real native Runtime. No network write or live account is needed.
+    runner->add({
+        .name = u"unprocessed anonymous wake is persisted before shutdown"_q,
+        .then = [] {
+            auto &loop = apo::CognitiveLoop::Instance();
+            auto &runtime = apo::Runtime::Instance();
+            Check(loop.isRunning() && runtime.isRunning(),
+                u"APΩ native runtime and cognitive loop are live before controlled stop"_q);
+            const auto sourceTrace = u"fixture_pending_trace"_q;
+            const auto admitted = apo::RecordBehavior(
+                apo::EventType::UiEvent, sourceTrace,
+                u"apo.test.synthetic_sensory_ingress"_q,
+                QJsonObject{{QStringLiteral("kind"),
+                    QStringLiteral("SYNTHETIC_PENDING_WAKE_STIMULUS")}});
+            Check(admitted,
+                u"synthetic sensory producer event is durably admitted"_q);
+            if (!admitted) return;
+            loop.requestWake(u"fixture_pending_signal"_q,
+                sourceTrace, QDateTime::currentMSecsSinceEpoch(), 0);
+            std::thread worker([] {
+                apo::Runtime::Instance().onMtprotoResponse(
+                    89000241,
+                    u"fixture.queuedResponse"_q,
+                    false,
+                    QJsonObject());
+            });
+            worker.join();
+            runtime.stop();
+            QCoreApplication::sendPostedEvents(&runtime);
+            Check(!runtime.isRunning() && !loop.isRunning(),
+                u"orderly native runtime shutdown stopped the cognitive loop"_q);
+            const auto path = QDir(cWorkingDir()).filePath(
+                u"apo/raw_behavior.jsonl"_q);
+            QFile raw(path);
+            const auto opened = raw.open(QIODevice::ReadOnly);
+            Check(opened, u"native RAW ledger remains readable after shutdown seal"_q);
+            if (!opened) return;
+            QSet<QString> earlierTraces;
+            auto pendingCount = 0;
+            auto pendingSequence = qint64(-1);
+            auto sealSequence = qint64(-1);
+            auto pendingHasRealParent = false;
+            auto pendingContainsFixture = false;
+            auto pendingContainsQueuedResponse = false;
+            auto pendingCorrectScope = false;
+            auto pendingCorrectStatus = false;
+            auto queuedResponsePersistedWithoutSuccess = false;
+            auto queuedResponseCount = 0;
+            auto queuedResponseSequence = qint64(-1);
+            auto actionsAfterFixture = 0;
+            auto sourceSequence = qint64(-1);
+            for (const auto &line : raw.readAll().split('\n')) {
+                const auto doc = QJsonDocument::fromJson(line);
+                if (!doc.isObject()) continue;
+                const auto event = doc.object();
+                const auto actor = event.value(QStringLiteral("actor")).toString();
+                const auto trace = event.value(QStringLiteral("trace_id")).toString();
+                const auto parent = event.value(QStringLiteral("parent_trace_id")).toString();
+                const auto sequence = qint64(
+                    event.value(QStringLiteral("sequence")).toDouble(-1));
+                const auto payload = event.value(QStringLiteral("payload")).toObject();
+                if (trace == u"mtproto-89000241"_q
+                        && actor == u"apo.mtproto.receiver"_q) {
+                    ++queuedResponseCount;
+                    queuedResponseSequence = sequence;
+                    queuedResponsePersistedWithoutSuccess
+                        = !payload.value(QStringLiteral("success")).toBool(true);
+                }
+                if (trace == sourceTrace
+                        && actor == u"apo.test.synthetic_sensory_ingress"_q) {
+                    sourceSequence = sequence;
+                }
+                if (actor == u"apo.cognitive.sensory_wake"_q
+                        && payload.value(QStringLiteral("kind")).toString()
+                            == u"NATIVE_SENSORY_WAKE_UNRESOLVED"_q) {
+                    ++pendingCount;
+                    pendingSequence = sequence;
+                    pendingHasRealParent = earlierTraces.contains(parent);
+                    pendingContainsFixture = payload.value(
+                        QStringLiteral("sources")).toArray().contains(
+                            QJsonValue(QStringLiteral("fixture_pending_signal")));
+                    pendingContainsQueuedResponse = payload.value(
+                        QStringLiteral("sources")).toArray().contains(
+                            QJsonValue(QStringLiteral("mtproto_response")));
+                    pendingCorrectScope = payload.value(
+                        QStringLiteral("scope_kind")).toString()
+                            == u"anonymous_profile"_q
+                        && payload.contains(QStringLiteral("profile_scope"))
+                        && !payload.contains(QStringLiteral("account_scope"));
+                    pendingCorrectStatus = event.value(
+                        QStringLiteral("event_type")).toString()
+                            == u"RAW.COMPUTATION"_q
+                        && payload.value(QStringLiteral("phase")).toString()
+                            == u"PENDING"_q
+                        && payload.value(QStringLiteral("result")).toString()
+                            == u"NOT_REPLAYED_NO_ACTION"_q;
+                }
+                if (actor == u"apo.runtime"_q
+                        && payload.value(QStringLiteral("status")).toString()
+                            == u"APO_RUNTIME_STOPPED"_q) {
+                    sealSequence = sequence;
+                }
+                if (sourceSequence > 0 && sequence > sourceSequence
+                        && actor == u"apo.executor.native"_q) {
+                    ++actionsAfterFixture;
+                }
+                if (!trace.isEmpty()) earlierTraces.insert(trace);
+            }
+            Check(pendingCount == 1 && pendingHasRealParent,
+                u"exactly one unresolved wake has an earlier durable producer"_q);
+            Check(pendingContainsFixture && pendingCorrectScope,
+                u"pending marker preserves anonymous scope and fixture source"_q);
+            Check(pendingCorrectStatus,
+                u"pending marker never claims an observed or closed action"_q);
+            Check(queuedResponseCount == 1
+                    && queuedResponsePersistedWithoutSuccess
+                    && queuedResponseSequence > 0
+                    && pendingSequence > queuedResponseSequence
+                    && pendingContainsQueuedResponse,
+                u"exactly one queued receiver precedes its linked pending marker"_q);
+            Check(sourceSequence > 0 && pendingSequence > sourceSequence
+                    && sealSequence > pendingSequence,
+                u"native ingress precedes pending wake and durable shutdown seal"_q);
+            Check(actionsAfterFixture == 0,
+                u"pending sensory stimulus triggers no native executor action"_q);
         },
     });
 }

@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_changes.h"
 
 #include "main/main_session.h"
+#include "apo/apo_runtime.h"
 
 namespace Data {
 
@@ -82,10 +83,12 @@ void Changes::Manager<DataType, UpdateType>::drop(not_null<DataType*> data) {
 }
 
 template <typename DataType, typename UpdateType>
-void Changes::Manager<DataType, UpdateType>::sendNotifications() {
+int Changes::Manager<DataType, UpdateType>::sendNotifications() {
+	const auto count = int(_updates.size());
 	for (const auto &[data, flags] : base::take(_updates)) {
 		_stream.fire({ data, flags });
 	}
+	return count;
 }
 
 Changes::Changes(not_null<Main::Session*> session) : _session(session) {
@@ -382,13 +385,25 @@ void Changes::sendNotifications() {
 		return;
 	}
 	_notify = false;
-	_peerChanges.sendNotifications();
-	_historyChanges.sendNotifications();
-	_messageChanges.sendNotifications();
-	_entryChanges.sendNotifications();
-	_topicChanges.sendNotifications();
-	_sublistChanges.sendNotifications();
-	_storyChanges.sendNotifications();
+	// Capture the owner before notifying subscribers: callbacks can trigger logout.
+	const auto accountUserId = session().userId().bare;
+	const auto counts = apo::NativeChangeNotificationCounts{
+		.peer = _peerChanges.sendNotifications(),
+		.history = _historyChanges.sendNotifications(),
+		.message = _messageChanges.sendNotifications(),
+		.entry = _entryChanges.sendNotifications(),
+		.topic = _topicChanges.sendNotifications(),
+		.sublist = _sublistChanges.sendNotifications(),
+		.story = _storyChanges.sendNotifications(),
+	};
+	// Only the model's batched change notifications have been delivered here.
+	// This is not proof of a matching remote postcondition.
+	if (counts.peer || counts.history || counts.message || counts.entry
+		|| counts.topic || counts.sublist || counts.story) {
+		apo::HookNativeChangeNotificationsFlushed(
+			accountUserId,
+			counts);
+	}
 }
 
 } // namespace Data

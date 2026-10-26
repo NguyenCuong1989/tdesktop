@@ -66,16 +66,29 @@ try {
         '"new_phase":"RECONCILING","result":"OUTCOME_UNRESOLVED"}'
     $second = New-LedgerEvent 2 'recovery' 'RAW.COMPUTATION' `
         'apo.cognitive.recovery' $recoveryPayload $first.Hash 2 1001 'body'
+    # Real runtime emits hash v2 records without parent_trace_id when unparented.
+    $third = New-LedgerEvent 3 'unparented' 'RAW.STATE_REDUCE' `
+        'apo.runtime' '{"status":"APO_RUNTIME_STOPPED"}' $second.Hash 2 1002
     [IO.File]::WriteAllText($validLedger,
-        $first.Line + "`n" + $second.Line + "`n",
+        $first.Line + "`n" + $second.Line + "`n" + $third.Line + "`n",
         [Text.UTF8Encoding]::new($false))
 
     $valid = (& $audit -LedgerPath $validLedger -MaxEvents 10) |
         ConvertFrom-Json
+    # A fixture ledger cannot establish a Telegram profile or executable.
+    if ($null -ne $valid.profileDirectory -or
+        $null -ne $valid.executablePresent -or
+        $valid.ledgerPath -ne $validLedger) {
+        throw 'Explicit ledger path incorrectly claims profile or binary provenance'
+    }
     if (!$valid.evaluatedPrefixIntegrityValid -or
+        $valid.eventTotals.eventCount -ne 3 -or
+        $valid.eventTotals.parseErrors -ne 0 -or
+        $valid.eventTotals.sequenceErrors -ne 0 -or
+        $valid.eventTotals.prevHashLinkErrors -ne 0 -or
         $valid.eventTotals.sha256Errors -ne 0 -or
         $valid.eventTotals.hashVersion1Events -ne 1 -or
-        $valid.eventTotals.hashVersion2Events -ne 1 -or
+        $valid.eventTotals.hashVersion2Events -ne 2 -or
         $valid.nativeBodyProjectionEvents -ne 1 -or
         $valid.completeNativeBodyProjectionEvents -ne 1 -or
         $valid.nativeBodyShapeErrors -ne 0 -or

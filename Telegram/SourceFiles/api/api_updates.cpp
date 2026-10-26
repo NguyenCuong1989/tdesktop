@@ -1507,9 +1507,12 @@ void Updates::applyUpdates(
 	apo::HookServerUpdate(
 		QStringLiteral("MTPUpdates"),
 		QJsonObject{
-			{ QStringLiteral("type"), static_cast<qint64>(updates.type()) },
-			{ QStringLiteral("sent_random_id"), static_cast<qint64>(sentMessageRandomId) }
-		});
+			{ QStringLiteral("envelope_type"),
+				static_cast<qint64>(updates.type()) },
+			{ QStringLiteral("sent_random_id"),
+				static_cast<qint64>(sentMessageRandomId) }
+			},
+		session().userId().bare);
 
 	const auto randomId = sentMessageRandomId;
 

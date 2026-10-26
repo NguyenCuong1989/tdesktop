@@ -167,13 +167,18 @@ jobs:
               $ledger -notmatch 'event\.timestampMs') {
               throw 'Ledger hash v2 metadata binding or v1 replay compatibility missing'
           }
+          $handledAsyncCalls = [regex]::Matches(
+              $runtime, 'if \(!RecordBehaviorAsync\(').Count
           if ($ledgerHeader -notmatch 'recordEventAsync\(' -or
-              $ledger -notmatch 'kMaxAsyncEvents' -or
-              $runtime -notmatch 'RecordBehaviorAsync\(') {
+              $ledgerHeader -notmatch 'struct LedgerLimits' -or
+              $ledger -notmatch '_limits\.maxAsyncEvents' -or
+              $ledger -notmatch 'ASYNC_EVIDENCE_GAP' -or
+              $ledgerHeader -notmatch 'bool seal\(' -or
+              $handledAsyncCalls -ne 5) {
               throw 'Bounded off-caller persistence for observational events is missing'
           }
-          if ($ledger -notmatch 'kMaxLedgerBytes' -or
-              $ledger -notmatch 'kReservedStorageBytes' -or
+          if ($ledgerHeader -notmatch 'maxLedgerBytes' -or
+              $ledgerHeader -notmatch 'reservedStorageBytes' -or
               $ledger -notmatch 'LedgerStorageAllowsAppend\(') {
               throw 'Ledger storage quota or free-space reserve guard is missing'
           }
@@ -200,7 +205,8 @@ jobs:
               $verifier -notmatch 'logPayload\[QStringLiteral\("parameter_hash"\)\]') {
               throw 'Omega proof is not bound to canonical action parameters'
           }
-          if ($ledger -notmatch 'QStringLiteral\("trace-%1-%2"\)\.arg\(event\.sequence\)\.arg\(nowMs\)') {
+          if ($ledger -notmatch 'QStringLiteral\("trace-%1-%2"\)' -or
+              $ledger -notmatch '\.arg\(pending\.timestampMs\)') {
               throw 'Fallback trace identifiers are not sequence-unique'
           }
           if ($body -match 'advancePhase\(action\.actionId, ActionPhase::Acknowledged\)' -or

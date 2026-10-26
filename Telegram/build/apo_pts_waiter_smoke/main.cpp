@@ -302,6 +302,39 @@ int main(int argc, char *argv[]) {
 			&& f.owner.timers == std::vector<crl::time>{ 1000 }
 			&& HooksMatch({ 480 }, { u"direct"_q });
 	});
+	failures += (RunReentrantArrivalProbe() != 0);
+	failures += !Run("reentrant grouped updates drain after queued PTS", [] {
+		Fixture f;
+		f.waiter.init(10);
+		f.waiter.updateAndApply(&f.channel, 12, 1, MTPUpdate(12));
+		f.waiter.updateAndApply(&f.channel, 13, 1, MTPUpdate(13));
+		f.owner.onApply = [&] {
+			f.owner.onApply = {};
+			f.waiter.updateAndApply(&f.channel, 14, 1, MTPUpdates(14));
+		};
+		f.waiter.updateAndApply(&f.channel, 11, 1, MTPUpdate(11));
+		return f.waiter.current() == 14
+			&& f.owner.applied == std::vector<int>({ 11, 12, 13, 14 })
+			&& HooksMatch(
+				{ 11, 12, 13, 14 },
+				{ u"queued"_q, u"queued"_q, u"queued"_q, u"direct"_q });
+	});
+	failures += !Run("reentrant PTS-only advance follows queued handlers", [] {
+		Fixture f;
+		f.waiter.init(10);
+		f.waiter.updateAndApply(&f.channel, 12, 1, MTPUpdate(12));
+		f.waiter.updateAndApply(&f.channel, 13, 1, MTPUpdate(13));
+		f.owner.onApply = [&] {
+			f.owner.onApply = {};
+			f.waiter.updateAndApply(&f.channel, 14, 1);
+		};
+		f.waiter.updateAndApply(&f.channel, 11, 1, MTPUpdate(11));
+		return f.waiter.current() == 14
+			&& f.owner.applied == std::vector<int>({ 11, 12, 13 })
+			&& HooksMatch(
+				{ 11, 12, 13 },
+				{ u"queued"_q, u"queued"_q, u"queued"_q });
+	});
 	std::cout << (failures
 		? "[FAIL] isolated actual-source smoke suite\n"
 		: "[PASS] isolated actual-source smoke suite\n");

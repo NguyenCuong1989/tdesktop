@@ -19,9 +19,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings.h"
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
+#include <QtCore/QDebug>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 namespace apo {
@@ -49,6 +51,33 @@ void CognitiveLoop::start(int intervalMs) {
 		step();
 	});
 	_loopTimer->start(intervalMs);
+	_wakeTimer = std::make_unique<QTimer>(this);
+	_wakeTimer->setSingleShot(true);
+	connect(_wakeTimer.get(), &QTimer::timeout, this, [this] {
+		if (!_running || !_pendingWakeCount) {
+			return;
+		}
+		if (_stepActive) {
+			_wakeTimer->start(250);
+			return;
+		}
+		_activeWakeCount = _pendingWakeCount;
+		_activeWakeAdmittedAtMs = _pendingWakeAdmittedAtMs;
+		_activeWakeStartedAtMs = QDateTime::currentMSecsSinceEpoch();
+		_activeWakeAccountUserId = _pendingWakeAccountUserId;
+		_activeWakeSources = std::move(_pendingWakeSources);
+		_activeWakeSourceTraceId = std::move(_pendingWakeSourceTraceId);
+		_pendingWakeCount = 0;
+		_pendingWakeAdmittedAtMs = 0;
+		_pendingWakeAccountUserId = 0;
+		step();
+		_activeWakeCount = 0;
+		_activeWakeAdmittedAtMs = 0;
+		_activeWakeStartedAtMs = 0;
+		_activeWakeAccountUserId = 0;
+		_activeWakeSources.clear();
+		_activeWakeSourceTraceId.clear();
+	});
 
 	QJsonObject payload;
 	payload[QStringLiteral("status")] = QStringLiteral("COGNITIVE_LOOP_STARTED");
@@ -60,9 +89,54 @@ void CognitiveLoop::start(int intervalMs) {
 		payload);
 }
 
-void CognitiveLoop::stop() {
+void CognitiveLoop::stop(bool recordPendingWake) {
 	if (!_running) {
 		return;
+	}
+	// The ingress may already be durable while its 250 ms wake timer
+	// has not fired. Classify it honestly before orderly ledger seal.
+	// Never replay historical network activity or claim a reflex occurred.
+	if (recordPendingWake && _pendingWakeCount > 0) {
+		QJsonObject pending;
+		pending[QStringLiteral("kind")] =
+			QStringLiteral("NATIVE_SENSORY_WAKE_UNRESOLVED");
+		pending[QStringLiteral("phase")] = QStringLiteral("PENDING");
+		pending[QStringLiteral("result")] =
+			QStringLiteral("NOT_REPLAYED_NO_ACTION");
+		pending[QStringLiteral("sources")] =
+			QJsonArray::fromStringList(_pendingWakeSources);
+		pending[QStringLiteral("coalesced_events")] = _pendingWakeCount;
+		pending[QStringLiteral("first_source_trace_id")] =
+			_pendingWakeSourceTraceId;
+		pending[QStringLiteral("wait_age_ms")] = static_cast<qint64>(
+			std::max<int64>(0,
+				QDateTime::currentMSecsSinceEpoch() - _pendingWakeAdmittedAtMs));
+		if (_pendingWakeAccountUserId == 0) {
+			pending[QStringLiteral("scope_kind")] =
+				QStringLiteral("anonymous_profile");
+			pending[QStringLiteral("profile_scope")] = QString::fromUtf8(
+				QCryptographicHash::hash(
+					(QStringLiteral("anonymous|") + cWorkingDir()).toUtf8(),
+					QCryptographicHash::Sha256).toHex());
+		} else {
+			// The source account is historical provenance, NOT proof that
+			// this is still the active authenticated Telegram session.
+			pending[QStringLiteral("scope_kind")] =
+				QStringLiteral("source_account_at_admission");
+			pending[QStringLiteral("account_scope")] = QString::fromUtf8(
+				QCryptographicHash::hash(
+					(QString::number(_pendingWakeAccountUserId)
+						+ QStringLiteral("|") + cWorkingDir()).toUtf8(),
+					QCryptographicHash::Sha256).toHex());
+		}
+		const auto traceId = QStringLiteral("wake-stop-%1-%2")
+			.arg(_cycleCount)
+			.arg(QDateTime::currentMSecsSinceEpoch());
+		if (!RecordBehavior(EventType::Computation, traceId,
+					QStringLiteral("apo.cognitive.sensory_wake"), pending,
+					_pendingWakeSourceTraceId)) {
+			qWarning("APO pending wake could not be persisted on orderly stop");
+		}
 	}
 	_running = false;
 	_lastRankingAccount = 0;
@@ -74,11 +148,27 @@ void CognitiveLoop::stop() {
 	_lastRemoteInspectionSourceTrace.clear();
 	_lastRemoteInspectionAccountScope.clear();
 	_lastRecoveryAccountScope.clear();
+	_stepActive = false;
+	_pendingWakeCount = 0;
+	_pendingWakeAdmittedAtMs = 0;
+	_pendingWakeAccountUserId = 0;
+	_pendingWakeSources.clear();
+	_pendingWakeSourceTraceId.clear();
+	_activeWakeCount = 0;
+	_activeWakeAdmittedAtMs = 0;
+	_activeWakeStartedAtMs = 0;
+	_activeWakeAccountUserId = 0;
+	_activeWakeSources.clear();
+	_activeWakeSourceTraceId.clear();
 	++_remoteInspectionGeneration; // Invalidate callbacks from a stopped loop.
 	_lastRankingEvidence.clear();
 	if (_loopTimer) {
 		_loopTimer->stop();
 		_loopTimer.reset();
+	}
+	if (_wakeTimer) {
+		_wakeTimer->stop();
+		_wakeTimer.reset();
 	}
 }
 
@@ -86,10 +176,43 @@ bool CognitiveLoop::isRunning() const {
 	return _running;
 }
 
-void CognitiveLoop::step() {
-	if (!_running) {
+void CognitiveLoop::requestWake(
+		const QString &source,
+		const QString &sourceTraceId,
+		int64 admittedAtMs,
+		int64 accountUserId) {
+	if (!_running || !_wakeTimer || source.isEmpty() || admittedAtMs <= 0) {
 		return;
 	}
+	if (_pendingWakeCount && _pendingWakeAccountUserId != accountUserId) {
+		_pendingWakeCount = 0;
+		_pendingWakeSources.clear();
+		_wakeTimer->start(250);
+	}
+	if (!_pendingWakeCount) {
+		_pendingWakeAdmittedAtMs = admittedAtMs;
+		_pendingWakeAccountUserId = accountUserId;
+		_pendingWakeSourceTraceId = sourceTraceId;
+	}
+	if (!_pendingWakeSources.contains(source)) {
+		_pendingWakeSources.push_back(source);
+	}
+	++_pendingWakeCount;
+	if (!_wakeTimer->isActive()) {
+		_wakeTimer->start(250);
+	}
+}
+
+void CognitiveLoop::step() {
+	if (!_running || _stepActive) {
+		return;
+	}
+	_stepActive = true;
+	stepNow();
+	_stepActive = false;
+}
+
+void CognitiveLoop::stepNow() {
 	++_cycleCount;
 	const auto traceId = QStringLiteral("cycle-%1-%2")
 		.arg(_cycleCount)
@@ -107,18 +230,49 @@ void CognitiveLoop::step() {
 	computePayload[QStringLiteral("has_user_identity")] = (self.userId != 0);
 	computePayload[QStringLiteral("unread")] = unreadCount;
 
-	RecordBehavior(
+	if (!RecordBehavior(
 		EventType::Computation,
 		traceId,
 		QStringLiteral("apo.cognitive.evaluator"),
-		computePayload);
+		computePayload)) {
+		return;
+	}
 
 	// 4. OBSERVE native dialogue context rather than interpreting the
 	// whole-account unread badge as an addressable chat or a customer request.
 	// A nonzero badge alone cannot authorize "compute.draft_reply": there
 	// is no message context, recipient, actual draft or measurable cost.
 	if (self.userId == 0) {
-		return;
+		// Even an anonymous native body must retain evidence of sensory
+		// wakeups. It must NOT invent an account or authorize an action.
+		// Keep the authenticated wake path below unchanged.
+		if (_activeWakeCount > 0
+				&& _activeWakeAccountUserId == 0
+				&& _activeWakeAdmittedAtMs > 0
+				&& _activeWakeStartedAtMs >= _activeWakeAdmittedAtMs) {
+			QJsonObject wake;
+			wake[QStringLiteral("kind")] = QStringLiteral("NATIVE_SENSORY_WAKE");
+			wake[QStringLiteral("sources")] = QJsonArray::fromStringList(
+				_activeWakeSources);
+			wake[QStringLiteral("scope_kind")] = QStringLiteral("anonymous_profile");
+			wake[QStringLiteral("profile_scope")] = QString::fromUtf8(
+				QCryptographicHash::hash(
+					(QStringLiteral("anonymous|") + cWorkingDir()).toUtf8(),
+					QCryptographicHash::Sha256).toHex());
+			wake[QStringLiteral("coalesced_events")] = _activeWakeCount;
+			wake[QStringLiteral("admission_to_wake_ms")] = static_cast<qint64>(
+				_activeWakeStartedAtMs - _activeWakeAdmittedAtMs);
+			if (!_activeWakeSourceTraceId.isEmpty()) {
+				wake[QStringLiteral("first_source_trace_id")] =
+					_activeWakeSourceTraceId;
+			}
+			if (!RecordBehavior(EventType::Computation, traceId,
+					QStringLiteral("apo.cognitive.sensory_wake"), wake,
+					_activeWakeSourceTraceId)) {
+				return;
+			}
+		}
+		return; // No authenticated native session: no reflex dispatch.
 	}
 	const auto session = Core::App().activeAccount().maybeSession();
 	if (!session || session->userId().bare != self.userId) {
@@ -282,6 +436,28 @@ void CognitiveLoop::step() {
 		(QString::number(self.userId) + QStringLiteral("|")
 			+ cWorkingDir()).toUtf8(),
 		QCryptographicHash::Sha256).toHex());
+	if (_activeWakeCount > 0
+			&& _activeWakeAccountUserId == self.userId
+			&& _activeWakeAdmittedAtMs > 0
+			&& _activeWakeStartedAtMs >= _activeWakeAdmittedAtMs) {
+		QJsonObject wake;
+		wake[QStringLiteral("kind")] = QStringLiteral("NATIVE_SENSORY_WAKE");
+		wake[QStringLiteral("sources")] = QJsonArray::fromStringList(
+			_activeWakeSources);
+		wake[QStringLiteral("account_scope")] = accountScope;
+		wake[QStringLiteral("coalesced_events")] = _activeWakeCount;
+		wake[QStringLiteral("admission_to_wake_ms")] = static_cast<qint64>(
+			_activeWakeStartedAtMs - _activeWakeAdmittedAtMs);
+		if (!_activeWakeSourceTraceId.isEmpty()) {
+			wake[QStringLiteral("first_source_trace_id")] =
+				_activeWakeSourceTraceId;
+		}
+		if (!RecordBehavior(EventType::Computation, traceId,
+				QStringLiteral("apo.cognitive.sensory_wake"), wake,
+				_activeWakeSourceTraceId)) {
+			return;
+		}
+	}
 	// Feed the existing StateBridge with distinct, measured native body types.
 	// This is observation only: no new action policy or convergence assumption.
 	NativeBodyProjection body;
@@ -324,6 +500,31 @@ void CognitiveLoop::step() {
 				QStringLiteral("apo.cognitive.recovery"), recovery,
 				pending.sourceTraceId)) {
 				return; // Unverifiable recovery cannot authorize a new transition.
+			}
+		}
+		// Native writes must not be retried based on a missing RPC callback.
+		// Surface persisted random_id and request identity for reconciliation.
+		for (const auto &pending :
+				BehaviorLedger::Instance().unresolvedNativeWrites(accountScope)) {
+			QJsonObject recovery;
+			recovery[QStringLiteral("kind")] =
+				QStringLiteral("NATIVE_WRITE_RECOVERY_PENDING");
+			recovery[QStringLiteral("action_id")] = pending.actionId;
+			recovery[QStringLiteral("account_scope")] = accountScope;
+			recovery[QStringLiteral("request_id")] = pending.requestId;
+			recovery[QStringLiteral("random_id_hex")] = pending.randomIdHex;
+			recovery[QStringLiteral("previous_phase")] = pending.phase;
+			recovery[QStringLiteral("server_acknowledged")] =
+				pending.serverAcknowledged;
+			recovery[QStringLiteral("native_postcondition_verified")] =
+				pending.postconditionVerified;
+			recovery[QStringLiteral("result")] =
+				QStringLiteral("OUTCOME_UNRESOLVED_NO_AUTOMATIC_RETRY");
+			recovery[QStringLiteral("new_phase")] =
+				QStringLiteral("RECONCILING");
+			if (!RecordBehavior(EventType::Computation, pending.actionId,
+				QStringLiteral("apo.cognitive.recovery"), recovery)) {
+				return;
 			}
 		}
 		_lastRecoveryAccountScope = accountScope;
@@ -395,6 +596,17 @@ void CognitiveLoop::step() {
 				"E:known_unread_rows_over_inspected;"
 				"B:loaded_and_full_coverage;"
 				"source:Data::Session.chatsList");
+		QJsonObject decision;
+		decision[QStringLiteral("decision")] =
+			QStringLiteral("SUBMIT_NATIVE_READ_INSPECTION");
+		decision[QStringLiteral("account_scope")] = accountScope;
+		decision[QStringLiteral("source_trace_id")] = traceId;
+		decision[QStringLiteral("state_domain")] =
+			QStringLiteral("dialogs.inspect_server");
+		if (!RecordBehavior(EventType::Decision, traceId,
+			QStringLiteral("apo.cognitive.omega_gate"), decision)) {
+			return;
+		}
 		_lastRemoteInspectionAtMs = nowMs;
 		_lastRemoteInspectionSucceeded = false;
 		_remoteInspectionInFlight = true;

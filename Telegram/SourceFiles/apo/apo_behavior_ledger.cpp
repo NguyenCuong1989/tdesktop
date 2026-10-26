@@ -16,21 +16,29 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 namespace apo {
 
 namespace {
-constexpr auto kMaxLedgerBytes = int64(512) * 1024 * 1024;
-constexpr auto kReservedStorageBytes = int64(1024) * 1024 * 1024;
-constexpr auto kMaxAsyncEvents = size_t(8192);
+[[nodiscard]] bool IsAsyncEvidenceGap(
+		const QString &actor,
+		const QJsonObject &payload) {
+	return actor == QStringLiteral("apo.behavior_ledger")
+		&& payload.value(QStringLiteral("status")).toString()
+			== QStringLiteral("ASYNC_EVIDENCE_GAP");
+}
+
 } // namespace
 
 bool LedgerStorageAllowsAppend(
 		int64 currentSize,
 		int64 appendSize,
-		int64 availableBytes) {
+		int64 availableBytes,
+		const LedgerLimits &limits) {
 	return currentSize >= 0
 		&& appendSize > 0
 		&& availableBytes >= 0
-		&& currentSize <= kMaxLedgerBytes - appendSize
+		&& limits.maxLedgerBytes >= appendSize
+		&& currentSize <= limits.maxLedgerBytes - appendSize
 		&& appendSize <= availableBytes
-		&& availableBytes - appendSize >= kReservedStorageBytes;
+		&& limits.reservedStorageBytes >= 0
+		&& availableBytes - appendSize >= limits.reservedStorageBytes;
 }
 
 BehaviorLedger &BehaviorLedger::Instance() {
@@ -44,12 +52,11 @@ BehaviorLedger::BehaviorLedger()
 
 BehaviorLedger::~BehaviorLedger() {
 	stopAsyncWriter();
-	flush();
 }
 
 void BehaviorLedger::startAsyncWriter() {
 	std::lock_guard lock(_asyncMutex);
-	if (_asyncWriter.joinable() || _asyncStopping) {
+	if (_asyncWriter.joinable() || _writerStopping) {
 		return;
 	}
 	_asyncWriter = std::thread([this] {
@@ -60,9 +67,10 @@ void BehaviorLedger::startAsyncWriter() {
 void BehaviorLedger::stopAsyncWriter() {
 	{
 		std::lock_guard lock(_asyncMutex);
-		_asyncStopping = true;
+		_writerStopping = true;
+		_admissionSealed = true;
 	}
-	_asyncWake.notify_one();
+	_asyncWake.notify_all();
 	if (_asyncWriter.joinable()) {
 		_asyncWriter.join();
 	}
@@ -81,7 +89,7 @@ void BehaviorLedger::asyncWriterLoop() {
 		{
 			std::unique_lock lock(_asyncMutex);
 			_asyncWake.wait(lock, [this] {
-				return _asyncStopping || !_asyncQueue.empty();
+				return _writerStopping || !_asyncQueue.empty();
 			});
 			if (_asyncQueue.empty()) {
 				break;
@@ -90,12 +98,31 @@ void BehaviorLedger::asyncWriterLoop() {
 			_asyncQueue.pop_front();
 			_asyncWriting = true;
 		}
-		recordEvent(
-			pending->type,
-			pending->traceId,
-			pending->actor,
-			pending->payload,
-			pending->parentTraceId);
+		const auto persisted = persistEvent(*pending);
+		auto failedCompletions = std::vector<
+			std::shared_ptr<std::promise<bool>>>();
+		{
+			std::lock_guard lock(_asyncMutex);
+			if (pending->asynchronous && _pendingAsyncEvents > 0) {
+				--_pendingAsyncEvents;
+			}
+			if (!persisted) {
+				_admissionFailed = true;
+				for (const auto &queued : _asyncQueue) {
+					if (queued.completion) {
+						failedCompletions.push_back(queued.completion);
+					}
+				}
+				_asyncQueue.clear();
+				_pendingAsyncEvents = 0;
+			}
+		}
+		if (pending->completion) {
+			pending->completion->set_value(persisted);
+		}
+		for (const auto &completion : failedCompletions) {
+			completion->set_value(false);
+		}
 		{
 			std::lock_guard lock(_asyncMutex);
 			_asyncWriting = false;
@@ -116,6 +143,98 @@ void BehaviorLedger::indexNativeReadUnlocked(
     const auto declared = payload.value(QStringLiteral("phase")).toString();
     const auto transition = payload.value(QStringLiteral("new_phase")).toString();
     const auto phase = transition.isEmpty() ? declared : transition;
+    // Reconstruct write outcomes from the verified RAW chain. A write is
+    // indexed only after a durable pre-dispatch intent with a random_id.
+    // Missing ACK, missing observed state, or crash must not imply failure.
+    if (actor == QStringLiteral("apo.executor.native")
+        && phase == QStringLiteral("PREPARING_DISPATCH")
+        && payload.value(QStringLiteral("native_method")).toString()
+            == QStringLiteral("messages.sendMessage")) {
+        const auto scope = payload.value(QStringLiteral("account_scope")).toString();
+        const auto randomHex = payload.value(QStringLiteral("random_id_hex")).toString();
+        if (scope.isEmpty() || randomHex.isEmpty()) return;
+        _nativeWriteRecovery.insert(actionId, {
+            actionId, scope, QString(), randomHex, phase, timestampMs
+        });
+        return;
+    }
+    auto write = _nativeWriteRecovery.find(actionId);
+    if (write != _nativeWriteRecovery.end()) {
+        if (actor != QStringLiteral("apo.executor.native")) return;
+        const auto observedRandom =
+            payload.value(QStringLiteral("random_id_hex")).toString();
+        // A write cannot gain ACK, observed-state or CLOSED evidence from
+        // a record lacking its persisted MTProto random_id correlation.
+        const auto positiveEvidence = phase == QStringLiteral("ACKNOWLEDGED")
+            || phase == QStringLiteral("STATE_CONFIRMED")
+            || phase == QStringLiteral("CLOSED");
+        if ((!observedRandom.isEmpty() && observedRandom != write->randomIdHex)
+            || (positiveEvidence && observedRandom.isEmpty())) {
+            write->phase = observedRandom.isEmpty()
+                ? QStringLiteral("CORRELATION_MISSING")
+                : QStringLiteral("CORRELATION_MISMATCH");
+            write->timestampMs = timestampMs;
+            return;
+        }
+        const auto requestId = payload.value(QStringLiteral("request_id"));
+        const auto validRequestId = requestId.isDouble()
+            && std::isfinite(requestId.toDouble())
+            && requestId.toDouble() > 0;
+        // All positive transitions must refer to the same native request.
+        // random_id identifies the message, but not the RPC that observed it.
+        if (positiveEvidence && !validRequestId) {
+            write->phase = phase == QStringLiteral("ACKNOWLEDGED")
+                ? QStringLiteral("ACK_REQUEST_ID_MISSING")
+                : QStringLiteral("POSTCONDITION_REQUEST_ID_MISSING");
+            write->timestampMs = timestampMs;
+            return;
+        }
+        if (validRequestId) {
+            const auto observedRequestId =
+                QString::number(static_cast<int64>(requestId.toDouble()));
+            if (!write->requestId.isEmpty()
+                && write->requestId != observedRequestId) {
+                write->phase = QStringLiteral("REQUEST_ID_MISMATCH");
+                write->timestampMs = timestampMs;
+                return;
+            }
+            write->requestId = observedRequestId;
+        }
+        const auto outcome = payload.value(QStringLiteral("result")).toString();
+        if (phase == QStringLiteral("ACKNOWLEDGED")
+            && outcome == QStringLiteral("SERVER_RESPONSE_RECEIVED")) {
+            write->serverAcknowledged = true;
+        }
+        // A success label alone is not native-state evidence. Require the
+        // exact message ID and observed outgoing projection emitted by the
+        // real send/readback path before permitting CLOSED on replay.
+        if (phase == QStringLiteral("STATE_CONFIRMED")
+            && outcome == QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED")) {
+            const auto messageId = payload.value(QStringLiteral("server_message_id"));
+            if (messageId.isDouble() && messageId.toDouble() > 0
+                && payload.value(QStringLiteral("native_projection_present"))
+                    == QJsonValue(true)) {
+                write->postconditionVerified = true;
+            }
+        }
+        if (phase == QStringLiteral("CLOSED")) {
+            if (write->serverAcknowledged && write->postconditionVerified
+                && outcome == QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED")) {
+                _nativeWriteRecovery.erase(write);
+            } else {
+                write->phase = QStringLiteral("CLOSED_WITHOUT_COMPLETE_EVIDENCE");
+                write->timestampMs = timestampMs;
+            }
+            return;
+        }
+        // A post-dispatch error and an unresolved write remain visible
+        // across restarts. Never automatically issue a second send.
+        if (!phase.isEmpty()) {
+            write->phase = phase;
+            write->timestampMs = timestampMs;
+        }
+        return;
+    }
     if (actor == QStringLiteral("apo.agent_core")
         && phase == QStringLiteral("PLANNED")
         && payload.value(QStringLiteral("action_type")).toString()
@@ -149,6 +268,26 @@ void BehaviorLedger::indexNativeReadUnlocked(
             it->phase = QStringLiteral("CLOSED_WITHOUT_POSTCONDITION_EVIDENCE");
             it->timestampMs = timestampMs;
         }
+        return;
+    }
+    // A generic native RPC error after dispatch is not proof that the
+    // server did not apply the request. Preserve the verified intent and
+    // request ID for reconciliation, including after a process restart.
+    // Pre-dispatch rejections still close without creating a false unknown.
+    if (phase == QStringLiteral("FAILED")
+        && actor == QStringLiteral("apo.executor.native")
+        && payload.value(QStringLiteral("result")).toString()
+            == QStringLiteral("NATIVE_RPC_ERROR")
+        && (it->phase == QStringLiteral("DISPATCHED")
+            || it->phase == QStringLiteral("ACKNOWLEDGED")
+            || it->phase == QStringLiteral("RECONCILING")
+            || it->phase == QStringLiteral("UNKNOWN_OUTCOME"))) {
+        const auto req = payload.value(QStringLiteral("request_id"));
+        if (req.isDouble() && req.toDouble() > 0) {
+            it->requestId = QString::number(static_cast<int64>(req.toDouble()));
+        }
+        it->phase = QStringLiteral("UNKNOWN_OUTCOME");
+        it->timestampMs = timestampMs;
         return;
     }
     if (phase == QStringLiteral("FAILED")
@@ -232,9 +371,18 @@ void BehaviorLedger::indexOmegaStateUnlocked(
 	}
 }
 
-void BehaviorLedger::init(const QString &storagePath) {
+void BehaviorLedger::init(
+		const QString &storagePath,
+		const LedgerLimits &limits) {
+	{
+		std::lock_guard lock(_asyncMutex);
+		if (_admissionFailed || _admissionSealed || _writerStopping) {
+			return;
+		}
+	}
 	{
 		QMutexLocker locker(&_mutex);
+		_limits = limits;
 		initUnlocked(storagePath);
 	}
 	if (isInitialized()) {
@@ -246,8 +394,10 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 	if (_initialized) {
 		return;
 	}
+	_file.reset();
 	_omegaHistory.clear();
 	_nativeReadRecovery.clear();
+	_nativeWriteRecovery.clear();
 
 	if (storagePath.isEmpty()) {
 		const auto appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -262,6 +412,7 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 
 	// Restore and verify the persisted chain before appending.
 	int64 restoredSequence = 0;
+	auto restoredGap = false;
 	auto restoredHash = QStringLiteral("0000000000000000000000000000000000000000000000000000000000000000");
 	if (QFile::exists(_filePath)) {
 		QFile reader(_filePath);
@@ -357,50 +508,89 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 				json.value(QStringLiteral("trace_id")).toString(),
 				json.value(QStringLiteral("payload")).toObject(),
 				timestampMs);
+			if (IsAsyncEvidenceGap(
+				json.value(QStringLiteral("actor")).toString(),
+				json.value(QStringLiteral("payload")).toObject())) {
+				restoredGap = true;
+			}
 			restoredHash = eventHash;
 			restoredSequence = sequence;
 		}
 	}
+	_sequence = restoredSequence;
+	_lastHash = restoredHash;
+	if (restoredGap) {
+		return;
+	}
 
 	_file = std::make_unique<QFile>(_filePath);
 	if (_file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-		_sequence = restoredSequence;
-		_lastHash = restoredHash;
 		_initialized = true;
 	}
 }
 
-bool BehaviorLedger::recordEvent(
-	EventType type,
-	const QString &traceId,
-	const QString &actor,
-	const QJsonObject &payload,
-	const QString &parentTraceId) {
-	QMutexLocker locker(&_mutex);
-	// A failed explicit init(path) must never silently fall back to the
-	// default AppData ledger. That would make a corrupted ledger appear
-	// writable and break the provenance of the entire event chain.
-	if (!_initialized && _filePath.isEmpty()) {
-		initUnlocked(QString());
+bool BehaviorLedger::prepareForAdmission() {
+	{
+		QMutexLocker locker(&_mutex);
+		// A failed explicit init(path) must never silently fall back to the
+		// default AppData ledger. That would make a corrupted ledger appear
+		// writable and break the provenance of the entire event chain.
+		if (!_initialized && _filePath.isEmpty()) {
+			initUnlocked(QString());
+		}
+		if (!_initialized) {
+			return false;
+		}
 	}
+	startAsyncWriter();
+	return true;
+}
+
+bool BehaviorLedger::enqueueSynchronous(
+		PendingEvent pending,
+		bool sealAdmission) {
+	if (!prepareForAdmission()) {
+		return false;
+	}
+	auto completion = std::make_shared<std::promise<bool>>();
+	auto result = completion->get_future();
+	pending.completion = completion;
+	{
+		std::lock_guard lock(_asyncMutex);
+		if (_writerStopping || _admissionFailed || _admissionSealed) {
+			return false;
+		}
+		pending.timestampMs = QDateTime::currentMSecsSinceEpoch();
+		if (sealAdmission) {
+			_admissionSealed = true;
+		}
+		_asyncQueue.push_back(std::move(pending));
+	}
+	_asyncWake.notify_one();
+	return result.get();
+}
+
+bool BehaviorLedger::persistEvent(const PendingEvent &pending) {
+	QMutexLocker locker(&_mutex);
 	if (!_initialized) {
-		// Do not create unverifiable in-memory events when persistence failed.
 		return false;
 	}
 
-	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
-
 	RawEvent event;
 	event.sequence = _sequence + 1;
-	event.traceId = traceId.isEmpty()
-		? QStringLiteral("trace-%1-%2").arg(event.sequence).arg(nowMs)
-		: traceId;
-	event.parentTraceId = parentTraceId;
-	event.type = type;
-	event.actor = actor.isEmpty() ? QStringLiteral("tdesktop.core") : actor;
-	event.payload = payload;
+	event.traceId = pending.traceId.isEmpty()
+		? QStringLiteral("trace-%1-%2")
+			.arg(event.sequence)
+			.arg(pending.timestampMs)
+		: pending.traceId;
+	event.parentTraceId = pending.parentTraceId;
+	event.type = pending.type;
+	event.actor = pending.actor.isEmpty()
+		? QStringLiteral("tdesktop.core")
+		: pending.actor;
+	event.payload = pending.payload;
 	event.prevHash = _lastHash;
-	event.timestampMs = nowMs;
+	event.timestampMs = pending.timestampMs;
 
 	// Version 2 also binds event timing and trace parentage. Existing v1
 	// records remain readable so a verified ledger can upgrade in place.
@@ -431,7 +621,11 @@ bool BehaviorLedger::recordEvent(
 	const auto availableBytes = (storage.isValid() && storage.isReady())
 		? storage.bytesAvailable()
 		: int64(-1);
-	if (!LedgerStorageAllowsAppend(previousSize, line.size(), availableBytes)) {
+	if (!LedgerStorageAllowsAppend(
+		previousSize,
+		line.size(),
+		availableBytes,
+		_limits)) {
 		_file->close();
 		_initialized = false;
 		return false;
@@ -455,36 +649,105 @@ bool BehaviorLedger::recordEvent(
 	return true;
 }
 
+bool BehaviorLedger::recordEvent(
+		EventType type,
+		const QString &traceId,
+		const QString &actor,
+		const QJsonObject &payload,
+		const QString &parentTraceId) {
+	auto pending = PendingEvent();
+	pending.type = type;
+	pending.traceId = traceId;
+	pending.actor = actor;
+	pending.payload = payload;
+	pending.parentTraceId = parentTraceId;
+	return enqueueSynchronous(std::move(pending), false);
+}
+
 bool BehaviorLedger::recordEventAsync(
 		EventType type,
 		const QString &traceId,
 		const QString &actor,
 		const QJsonObject &payload,
 		const QString &parentTraceId) {
-	{
-		QMutexLocker locker(&_mutex);
-		if (!_initialized && _filePath.isEmpty()) {
-			initUnlocked(QString());
-		}
-		if (!_initialized) {
-			return false;
-		}
+	if (!prepareForAdmission()) {
+		return false;
 	}
-	startAsyncWriter();
+	auto accepted = false;
+	auto wakeWriter = false;
 	{
 		std::lock_guard lock(_asyncMutex);
-		if (_asyncStopping || _asyncQueue.size() >= kMaxAsyncEvents) {
+		if (_writerStopping || _admissionFailed || _admissionSealed) {
 			return false;
 		}
-		_asyncQueue.push_back({ type, traceId, actor, payload, parentTraceId });
+		const auto timestampMs = QDateTime::currentMSecsSinceEpoch();
+		if (_pendingAsyncEvents >= _limits.maxAsyncEvents) {
+			_admissionFailed = true;
+			if (!_gapQueued) {
+				auto gap = PendingEvent();
+				gap.type = EventType::StateReduce;
+				gap.traceId = QStringLiteral("ledger-async-gap");
+				gap.actor = QStringLiteral("apo.behavior_ledger");
+				gap.payload[QStringLiteral("status")] =
+					QStringLiteral("ASYNC_EVIDENCE_GAP");
+				gap.payload[QStringLiteral("reason")] =
+					QStringLiteral("ASYNC_QUEUE_CAPACITY_EXCEEDED");
+				gap.payload[QStringLiteral("attempted_event_type")] =
+					EventTypeToString(type);
+				gap.payload[QStringLiteral("attempted_trace_supplied")] =
+					!traceId.isEmpty();
+				gap.timestampMs = timestampMs;
+				_asyncQueue.push_back(std::move(gap));
+				_gapQueued = true;
+				wakeWriter = true;
+			}
+		} else {
+			auto pending = PendingEvent();
+			pending.type = type;
+			pending.traceId = traceId;
+			pending.actor = actor;
+			pending.payload = payload;
+			pending.parentTraceId = parentTraceId;
+			pending.timestampMs = timestampMs;
+			pending.asynchronous = true;
+			_asyncQueue.push_back(std::move(pending));
+			++_pendingAsyncEvents;
+			accepted = true;
+			wakeWriter = true;
+		}
 	}
-	_asyncWake.notify_one();
-	return true;
+	if (wakeWriter) {
+		_asyncWake.notify_one();
+	}
+	return accepted;
+}
+
+bool BehaviorLedger::seal(
+		EventType type,
+		const QString &traceId,
+		const QString &actor,
+		const QJsonObject &payload,
+		const QString &parentTraceId) {
+	auto pending = PendingEvent();
+	pending.type = type;
+	pending.traceId = traceId;
+	pending.actor = actor;
+	pending.payload = payload;
+	pending.parentTraceId = parentTraceId;
+	return enqueueSynchronous(std::move(pending), true);
 }
 
 bool BehaviorLedger::isInitialized() const {
-	QMutexLocker locker(&_mutex);
-	return _initialized;
+	auto initialized = false;
+	{
+		QMutexLocker locker(&_mutex);
+		initialized = _initialized;
+	}
+	if (!initialized) {
+		return false;
+	}
+	std::lock_guard lock(_asyncMutex);
+	return !_writerStopping && !_admissionFailed && !_admissionSealed;
 }
 
 QString BehaviorLedger::lastHash() const {
@@ -503,6 +766,22 @@ QVector<NativeReadRecoveryEvidence> BehaviorLedger::unresolvedNativeReads(
     QVector<NativeReadRecoveryEvidence> result;
     if (!_initialized || accountScope.isEmpty()) return result;
     for (auto it = _nativeReadRecovery.cbegin(); it != _nativeReadRecovery.cend(); ++it) {
+        if (it.value().accountScope == accountScope) result.push_back(it.value());
+    }
+    std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+        if (a.timestampMs != b.timestampMs) return a.timestampMs < b.timestampMs;
+        return a.actionId < b.actionId;
+    });
+    return result;
+}
+
+QVector<NativeWriteRecoveryEvidence> BehaviorLedger::unresolvedNativeWrites(
+    const QString &accountScope) const {
+    QMutexLocker locker(&_mutex);
+    QVector<NativeWriteRecoveryEvidence> result;
+    if (!_initialized || accountScope.isEmpty()) return result;
+    for (auto it = _nativeWriteRecovery.cbegin();
+            it != _nativeWriteRecovery.cend(); ++it) {
         if (it.value().accountScope == accountScope) result.push_back(it.value());
     }
     std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
@@ -549,10 +828,6 @@ bool BehaviorLedger::verifyOmegaStatePair(
 
 void BehaviorLedger::flush() {
 	drainAsyncWriter();
-	QMutexLocker locker(&_mutex);
-	if (_file && _file->isOpen()) {
-		_file->flush();
-	}
 }
 
 } // namespace apo

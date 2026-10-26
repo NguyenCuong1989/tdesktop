@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
 #include <QtCore/QByteArray>
+#include <QtCore/QStringList>
 #include <memory>
 
 namespace apo {
@@ -19,8 +20,14 @@ public:
 	static CognitiveLoop &Instance();
 
 	void start(int intervalMs = 10000);
-	void stop();
+	// Only an orderly runtime shutdown may persist deferred sensory work.
+	void stop(bool recordPendingWake = false);
 	[[nodiscard]] bool isRunning() const;
+	void requestWake(
+		const QString &source,
+		const QString &sourceTraceId,
+		int64 admittedAtMs,
+		int64 accountUserId);
 
 	// Single step execution of the active cognitive loop:
 	// observe -> estimate -> compute -> discover -> decide -> verify -> act -> observe result -> learn
@@ -32,9 +39,23 @@ private:
 
 	CognitiveLoop(const CognitiveLoop &) = delete;
 	CognitiveLoop &operator=(const CognitiveLoop &) = delete;
+	void stepNow();
 
 	bool _running = false;
 	std::unique_ptr<QTimer> _loopTimer;
+	std::unique_ptr<QTimer> _wakeTimer;
+	bool _stepActive = false;
+	int _pendingWakeCount = 0;
+	int64 _pendingWakeAdmittedAtMs = 0;
+	int64 _pendingWakeAccountUserId = 0;
+	QStringList _pendingWakeSources;
+	QString _pendingWakeSourceTraceId;
+	int _activeWakeCount = 0;
+	int64 _activeWakeAdmittedAtMs = 0;
+	int64 _activeWakeStartedAtMs = 0;
+	int64 _activeWakeAccountUserId = 0;
+	QStringList _activeWakeSources;
+	QString _activeWakeSourceTraceId;
 	int64 _cycleCount = 0;
 	int64 _lastRankingAccount = 0;
 	int64 _lastRemoteInspectionAccount = 0;

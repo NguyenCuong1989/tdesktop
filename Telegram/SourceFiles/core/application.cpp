@@ -244,21 +244,17 @@ Application::Application()
 				const auto &credits = session->credits();
 				if (credits.loaded()) {
 					const auto value = credits.balance();
-					if (value.stars()) {
-						apo::StateBridge::Instance().updateStarsCredits(
-							session->userId().bare,
-							value.whole(),
-							value.nano());
-					}
+					apo::StateBridge::Instance().updateStarsCredits(
+						session->userId().bare,
+						value.whole(),
+						value.nano());
 				}
 				if (credits.tonLoaded()) {
 					const auto value = credits.tonBalance();
-					if (value.ton()) {
-						apo::StateBridge::Instance().updateTelegramTonCredits(
-							session->userId().bare,
-							value.whole(),
-							value.nano());
-					}
+					apo::StateBridge::Instance().updateTelegramTonCredits(
+						session->userId().bare,
+						value.whole(),
+						value.nano());
 				}
 			};
 			auto &credits = session->credits();
@@ -284,6 +280,32 @@ Application::Application()
 			// Logout/no active account invalidates every projected account field.
 			apo::StateBridge::Instance().updateUserProfile(
 				0, QString(), QString(), QString(), QString(), false);
+		}
+
+		const auto accountsAuthed = _domain->accountsAuthedCount();
+		const auto bridgeSelf = apo::StateBridge::Instance().currentSelf();
+		const auto bridgeHasIdentity = (bridgeSelf.userId != 0);
+		const auto bridgeMatchesNative = session
+			&& (bridgeSelf.userId == session->userId().bare);
+		const auto diagnosticStatus = session
+			? (bridgeMatchesNative
+				? QStringLiteral("ACTIVE_MATCH")
+				: QStringLiteral("ACTIVE_MISMATCH"))
+			: (accountsAuthed > 0
+				? QStringLiteral("NO_ACTIVE_BUT_OTHER_AUTHED")
+				: QStringLiteral("NO_AUTHED_SESSION"));
+		if (!apo::RecordBehavior(
+			apo::EventType::StateReduce,
+			QString(),
+			QStringLiteral("apo.native.identity_transition"),
+			QJsonObject{
+				{ QStringLiteral("active_has_session"), session != nullptr },
+				{ QStringLiteral("accounts_authed"), accountsAuthed },
+				{ QStringLiteral("bridge_has_identity"), bridgeHasIdentity },
+				{ QStringLiteral("bridge_matches_native"), bridgeMatchesNative },
+				{ QStringLiteral("diagnostic_status"), diagnosticStatus },
+			})) {
+			qWarning("APO identity transition event not persisted");
 		}
 	}, _lifetime);
 

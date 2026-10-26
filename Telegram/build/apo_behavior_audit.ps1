@@ -19,6 +19,9 @@ $ledger = if ([string]::IsNullOrWhiteSpace($LedgerPath)) {
 if (!(Test-Path -LiteralPath $ledger)) {
     throw 'This native Telegram profile has no APΩ ledger; runtime not evidenced'
 }
+# FileStream resolves relative paths against the host process directory,
+# which can differ from PowerShell's Set-Location in an MCP shell.
+$ledger = (Resolve-Path -LiteralPath $ledger).ProviderPath
 $reader = $null
 $file = $null
 $types = @{}
@@ -101,13 +104,16 @@ try {
                 throw 'Ledger payload bounds are invalid'
             }
             $payloadJson = $line.Substring($payloadStart, $payloadEnd - $payloadStart)
+            $parentTraceId = if ($null -ne $event.PSObject.Properties['parent_trace_id']) {
+                [string]$event.parent_trace_id
+            } else { '' }
             $canonical = if ($hashVersion -eq 1) {
                 '{0}:{1}:{2}:{3}:{4}:{5}' -f $sequence,
                     [string]$event.trace_id, $type, $actor, $prev, $payloadJson
             } elseif ($hashVersion -eq 2) {
                 '{0}:{1}:{2}:{3}:{4}:{5}:{6}:{7}:{8}' -f $hashVersion,
                     $sequence, [string]$event.trace_id,
-                    [string]$event.parent_trace_id, $type, $actor,
+                    $parentTraceId, $type, $actor,
                     [long]$event.timestamp_ms, $prev, $payloadJson
             } else {
                 ''
@@ -422,12 +428,21 @@ $nativeReadActions = @($nativeReadActions | Sort-Object firstSeq)
 $e2eCount = @($nativeReadActions | Where-Object {
     $_.readOnlyE2EVerified
 }).Count
+# An explicitly selected ledger does not prove which binary produced it.
+$explicitLedger = ![string]::IsNullOrWhiteSpace($LedgerPath)
+$auditedProfile = if (!$explicitLedger) {
+    $WorkingDir
+} elseif ((Split-Path $ledger -Leaf) -eq 'raw_behavior.jsonl' -and
+        (Split-Path (Split-Path $ledger -Parent) -Leaf) -eq 'apo') {
+    Split-Path (Split-Path $ledger -Parent) -Parent
+} else { $null }
 $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debug\Telegram.exe'
 [ordered]@{
     tool='Ω-Telegram native behavior evidence audit'
-    profileDirectory=$WorkingDir
+    profileDirectory=$auditedProfile
+    ledgerPath=$ledger
     evaluatedAt=(Get-Date).ToString('o')
-    executablePresent=(Test-Path $exe)
+    executablePresent=$(if ($explicitLedger) { $null } else { Test-Path $exe })
     ledgerBytes=(Get-Item $ledger).Length
     eventTotals=$totals
     lastSequence=$lastSequence

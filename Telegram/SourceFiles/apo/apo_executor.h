@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "apo/apo_common.h"
 #include "apo/apo_verifier.h"
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QMap>
 #include <QtCore/QMutex>
 #include <QtCore/QString>
@@ -42,6 +43,39 @@ enum class ActionPhase {
     bool projectionLoaded, int serverDialogs, int matchedLocalDialogs) {
     return projectionLoaded && serverDialogs > 0
         && matchedLocalDialogs == serverDialogs;
+}
+
+// A native operation must stay bound to the authenticated account that
+// produced its verified state, including after an approval delay.
+[[nodiscard]] constexpr bool NativeAccountBindingConfirmed(
+    int64 initiatingAccountUserId, int64 currentAccountUserId) {
+    return initiatingAccountUserId > 0
+        && currentAccountUserId > 0
+        && initiatingAccountUserId == currentAccountUserId;
+}
+
+// The ledger observation scope is SHA-256(account ID | native working directory).
+// A valid pair from another account or profile cannot authorize this session.
+[[nodiscard]] inline bool NativeAccountScopeConfirmed(
+    int64 accountUserId, const QString &workingDir, const QString &claimedScope) {
+    if (accountUserId <= 0 || workingDir.isEmpty() || claimedScope.isEmpty()) {
+        return false;
+    }
+    const auto expected = QCryptographicHash::hash(
+        (QString::number(accountUserId) + QStringLiteral("|") + workingDir).toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    return claimedScope == QString::fromUtf8(expected);
+}
+
+// The Creator must see the complete payload of any proposed native write.
+// This is UI-only: do not persist message text in the behavior ledger.
+[[nodiscard]] inline QString NativeSendApprovalPreview(
+    const QString &target, const QString &text) {
+    return QStringLiteral(
+        "Ω-Telegram requires Creator approval.\n\n"
+        "Action: messages.send_text\nTarget: %1\n\n"
+        "Exact message (%2 characters):\n%3")
+        .arg(target, QString::number(text.size()), text);
 }
 
 [[nodiscard]] inline QString ActionPhaseToString(ActionPhase phase) {

@@ -9,9 +9,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "apo/apo_authority.h"
 #include "apo/apo_state_bridge.h"
 #include "apo/apo_cognitive_loop.h"
+#include "core/application.h"
+#include "main/main_account.h"
+#include "main/main_domain.h"
+#include "main/main_session.h"
 #include "settings.h"
+#include <QtCore/QCoreApplication>
 #include <QtCore/QDir>
 #include <QtCore/QDebug>
+#include <QtCore/QCryptographicHash>
+#include <QtCore/QEvent>
+#include <QtCore/QMetaObject>
+#include <QtCore/QMutexLocker>
+#include <QtCore/QThread>
 
 namespace apo {
 
@@ -76,15 +86,39 @@ void Runtime::start() {
 
 	// Start native cognitive agent loop
 	CognitiveLoop::Instance().start(10000);
+	{
+		QMutexLocker lock(&_ingressMutex);
+		_ingressOpen = true;
+	}
 }
 
 void Runtime::stop() {
+	{
+		QMutexLocker lock(&_ingressMutex);
+		_ingressOpen = false;
+		if (!_running) {
+			return;
+		}
+	}
+	if (QThread::currentThread() != thread()) {
+		const auto queued = QMetaObject::invokeMethod(this, [this] {
+			stop();
+		}, Qt::QueuedConnection);
+		if (!queued) {
+			qWarning("APO runtime shutdown enqueue failed");
+		}
+		return;
+	}
+
+	QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
 	if (!_running) {
 		return;
 	}
-	_running = false;
 
-	CognitiveLoop::Instance().stop();
+	// Record an unresolved sensory wake before sealing this profile's ledger.
+	// Ledger-failure stop paths continue to use stop() without this marker.
+	CognitiveLoop::Instance().stop(true);
+	_running = false;
 
 	if (_heartbeatTimer) {
 		_heartbeatTimer->stop();
@@ -93,11 +127,13 @@ void Runtime::stop() {
 
 	QJsonObject payload;
 	payload[QStringLiteral("status")] = QStringLiteral("APO_RUNTIME_STOPPED");
-	RecordBehavior(
+	if (!BehaviorLedger::Instance().seal(
 		EventType::StateReduce,
 		QStringLiteral("shutdown"),
 		QStringLiteral("apo.runtime"),
-		payload);
+		payload)) {
+		qWarning("APO runtime shutdown ledger seal failed");
+	}
 
 	BehaviorLedger::Instance().flush();
 }
@@ -106,18 +142,35 @@ bool Runtime::isRunning() const {
 	return _running;
 }
 
+void Runtime::onLedgerAdmissionFailure() {
+	{
+		QMutexLocker lock(&_ingressMutex);
+		_ingressOpen = false;
+		if (!_running) {
+			return;
+		}
+	}
+	_running = false;
+	CognitiveLoop::Instance().stop();
+	if (_heartbeatTimer) {
+		_heartbeatTimer->stop();
+	}
+	qWarning("APO agent stopped: ledger queue admission failed");
+}
+
 void Runtime::onHeartbeatTick() {
 	if (!_running) {
 		return;
 	}
 	if (!BehaviorLedger::Instance().isInitialized()) {
-		// Keep the Telegram UI alive, but disable unverified agent actions.
+		{
+			QMutexLocker lock(&_ingressMutex);
+			_ingressOpen = false;
+		}
 		_running = false;
 		CognitiveLoop::Instance().stop();
-		if (_heartbeatTimer) {
-			_heartbeatTimer->stop();
-		}
-		qWarning("APO agent stopped: ledger persistence lost");
+		_heartbeatTimer->stop();
+		qWarning("APO agent stopped: ledger is unavailable");
 		return;
 	}
 
@@ -125,34 +178,104 @@ void Runtime::onHeartbeatTick() {
 	payload[QStringLiteral("tick_time")] = static_cast<qint64>(QDateTime::currentMSecsSinceEpoch());
 	payload[QStringLiteral("total_events")] = static_cast<qint64>(BehaviorLedger::Instance().totalEvents());
 
-	RecordBehaviorAsync(
+	if (!RecordBehaviorAsync(
 		EventType::Computation,
 		QStringLiteral("heartbeat"),
 		QStringLiteral("apo.runtime.heartbeat"),
-		payload);
+		payload)) {
+		onLedgerAdmissionFailure();
+	}
 }
 
 void Runtime::onUiEvent(
 	const QString &widgetName,
 	const QString &actionName,
 	const QJsonObject &details) {
+	auto accountUserId = int64(0);
+	{
+		QMutexLocker lock(&_ingressMutex);
+		if (!_ingressOpen) {
+			return;
+		}
+		accountUserId = StateBridge::Instance().currentSelf().userId;
+		if (QThread::currentThread() != thread()) {
+			const auto queued = QMetaObject::invokeMethod(this, [=] {
+				recordUiEvent(widgetName, actionName, details, accountUserId);
+			}, Qt::QueuedConnection);
+			if (!queued) {
+				qWarning("APO runtime ingress enqueue failed: UI event");
+			}
+			return;
+		}
+	}
+	recordUiEvent(widgetName, actionName, details, accountUserId);
+}
+
+void Runtime::recordUiEvent(
+		const QString &widgetName,
+		const QString &actionName,
+		const QJsonObject &details,
+		int64 accountUserId) {
+	if (!_running) {
+		return;
+	}
+	const auto admittedAtMs = QDateTime::currentMSecsSinceEpoch();
+	const auto traceId = QStringLiteral("sensory-%1-%2")
+		.arg(admittedAtMs)
+		.arg(++_sensorySequence);
 	QJsonObject payload;
 	payload[QStringLiteral("detail_count")] = details.size();
 	payload[QStringLiteral("details_redacted")] = true;
 	payload[QStringLiteral("widget")] = widgetName;
 	payload[QStringLiteral("action")] = actionName;
 
-	RecordBehaviorAsync(
+	if (!RecordBehaviorAsync(
 		EventType::UiEvent,
-		QString(),
+		traceId,
 		widgetName,
-		payload);
+		payload)) {
+		onLedgerAdmissionFailure();
+		return;
+	}
+	CognitiveLoop::Instance().requestWake(
+		QStringLiteral("ui_event"), traceId, admittedAtMs,
+		accountUserId);
 }
 
 void Runtime::onMtprotoRequest(
 	int64 reqId,
 	const QString &method,
 	const QJsonObject &params) {
+	auto accountUserId = int64(0);
+	{
+		QMutexLocker lock(&_ingressMutex);
+		if (!_ingressOpen) {
+			return;
+		}
+		accountUserId = StateBridge::Instance().currentSelf().userId;
+		if (QThread::currentThread() != thread()) {
+			const auto queued = QMetaObject::invokeMethod(this, [=] {
+				recordMtprotoRequest(reqId, method, params, accountUserId);
+			}, Qt::QueuedConnection);
+			if (!queued) {
+				qWarning("APO runtime ingress enqueue failed: MTProto request");
+			}
+			return;
+		}
+	}
+	recordMtprotoRequest(reqId, method, params, accountUserId);
+}
+
+void Runtime::recordMtprotoRequest(
+		int64 reqId,
+		const QString &method,
+		const QJsonObject &params,
+		int64 accountUserId) {
+	if (!_running) {
+		return;
+	}
+	const auto admittedAtMs = QDateTime::currentMSecsSinceEpoch();
+	const auto traceId = QStringLiteral("mtproto-%1").arg(reqId);
 	QJsonObject payload;
 	payload[QStringLiteral("req_id")] = static_cast<qint64>(reqId);
 	payload[QStringLiteral("method")] = method;
@@ -163,11 +286,17 @@ void Runtime::onMtprotoRequest(
 		payload[QStringLiteral("request_constructor_id")] = constructor;
 	}
 
-	RecordBehaviorAsync(
+	if (!RecordBehaviorAsync(
 		EventType::Execution,
-		QStringLiteral("mtproto-%1").arg(reqId),
+		traceId,
 		QStringLiteral("apo.mtproto.dispatcher"),
-		payload);
+		payload)) {
+		onLedgerAdmissionFailure();
+		return;
+	}
+	CognitiveLoop::Instance().requestWake(
+		QStringLiteral("mtproto_request"), traceId, admittedAtMs,
+		accountUserId);
 }
 
 void Runtime::onMtprotoResponse(
@@ -175,6 +304,38 @@ void Runtime::onMtprotoResponse(
 	const QString &method,
 	bool success,
 	const QJsonObject &result) {
+	auto accountUserId = int64(0);
+	{
+		QMutexLocker lock(&_ingressMutex);
+		if (!_ingressOpen) {
+			return;
+		}
+		accountUserId = StateBridge::Instance().currentSelf().userId;
+		if (QThread::currentThread() != thread()) {
+			const auto queued = QMetaObject::invokeMethod(this, [=] {
+				recordMtprotoResponse(
+					reqId, method, success, result, accountUserId);
+			}, Qt::QueuedConnection);
+			if (!queued) {
+				qWarning("APO runtime ingress enqueue failed: MTProto response");
+			}
+			return;
+		}
+	}
+	recordMtprotoResponse(reqId, method, success, result, accountUserId);
+}
+
+void Runtime::recordMtprotoResponse(
+		int64 reqId,
+		const QString &method,
+		bool success,
+		const QJsonObject &result,
+		int64 accountUserId) {
+	if (!_running) {
+		return;
+	}
+	const auto admittedAtMs = QDateTime::currentMSecsSinceEpoch();
+	const auto traceId = QStringLiteral("mtproto-%1").arg(reqId);
 	QJsonObject payload;
 	payload[QStringLiteral("req_id")] = static_cast<qint64>(reqId);
 	payload[QStringLiteral("method")] = method;
@@ -193,26 +354,160 @@ void Runtime::onMtprotoResponse(
 		payload[QStringLiteral("error_code")] = code;
 	}
 
-	RecordBehaviorAsync(
+	if (!RecordBehaviorAsync(
 		EventType::ObservedResult,
-		QStringLiteral("mtproto-%1").arg(reqId),
+		traceId,
 		QStringLiteral("apo.mtproto.receiver"),
-		payload);
+		payload)) {
+		onLedgerAdmissionFailure();
+		return;
+	}
+	CognitiveLoop::Instance().requestWake(
+		QStringLiteral("mtproto_response"), traceId, admittedAtMs,
+		accountUserId);
 }
 
 void Runtime::onServerUpdate(
 	const QString &updateType,
-	const QJsonObject &updateData) {
+	const QJsonObject &updateData,
+	int64 accountUserId) {
+	{
+		QMutexLocker lock(&_ingressMutex);
+		if (!_ingressOpen) {
+			return;
+		}
+		if (QThread::currentThread() != thread()) {
+			const auto queued = QMetaObject::invokeMethod(this, [=] {
+				recordServerUpdate(updateType, updateData, accountUserId);
+			}, Qt::QueuedConnection);
+			if (!queued) {
+				qWarning("APO runtime ingress enqueue failed: server update");
+			}
+			return;
+		}
+	}
+	recordServerUpdate(updateType, updateData, accountUserId);
+}
+
+void Runtime::recordServerUpdate(
+		const QString &updateType,
+		const QJsonObject &updateData,
+		int64 accountUserId) {
+	if (!_running) {
+		return;
+	}
+	const auto admittedAtMs = QDateTime::currentMSecsSinceEpoch();
+	const auto traceId = QStringLiteral("sensory-%1-%2")
+		.arg(admittedAtMs)
+		.arg(++_sensorySequence);
 	QJsonObject payload;
 	payload[QStringLiteral("update_type")] = updateType;
-	payload[QStringLiteral("data_field_count")] = updateData.size();
 	payload[QStringLiteral("data_redacted")] = true;
+	const auto copyAllowed = [&](const auto &key) {
+		const auto value = updateData.value(key);
+		if (!value.isUndefined()) {
+			payload[key] = value;
+		}
+	};
+	copyAllowed(QStringLiteral("constructor_id"));
+	copyAllowed(QStringLiteral("envelope_type"));
+	copyAllowed(QStringLiteral("phase"));
+	copyAllowed(QStringLiteral("dispatch_mode"));
 
-	RecordBehaviorAsync(
+	if (!RecordBehaviorAsync(
 		EventType::ExternalInput,
-		QString(),
+		traceId,
 		QStringLiteral("apo.server.update"),
-		payload);
+		payload)) {
+		onLedgerAdmissionFailure();
+		return;
+	}
+	CognitiveLoop::Instance().requestWake(
+		QStringLiteral("server_update"), traceId, admittedAtMs,
+		accountUserId);
+}
+
+void Runtime::onNativeChangeNotificationsFlushed(
+		int64 accountUserId,
+		NativeChangeNotificationCounts counts) {
+	{
+		QMutexLocker lock(&_ingressMutex);
+		if (!_ingressOpen) {
+			return;
+		}
+		if (QThread::currentThread() != thread()) {
+			const auto queued = QMetaObject::invokeMethod(
+				this,
+				[this, accountUserId, counts] {
+					recordNativeChangeNotificationsFlushed(
+						accountUserId,
+						counts);
+				},
+				Qt::QueuedConnection);
+			if (!queued) {
+				qWarning("APO runtime ingress enqueue failed: model notification");
+			}
+			return;
+		}
+	}
+	recordNativeChangeNotificationsFlushed(accountUserId, counts);
+}
+
+void Runtime::recordNativeChangeNotificationsFlushed(
+		int64 accountUserId,
+		NativeChangeNotificationCounts counts) {
+	// Do not mix old account callbacks with a newly active body projection.
+	if (!_running || !accountUserId
+		|| StateBridge::Instance().currentSelf().userId != accountUserId) {
+		return;
+	}
+	const auto &domain = Core::App().domain();
+	if (!domain.started() || domain.accounts().empty()) {
+		return;
+	}
+	const auto session = domain.active().maybeSession();
+	if (!session || session->userId().bare != accountUserId) {
+		return;
+	}
+	const auto admittedAtMs = QDateTime::currentMSecsSinceEpoch();
+	const auto traceId = QStringLiteral("model-notify-%1-%2")
+		.arg(admittedAtMs)
+		.arg(++_sensorySequence);
+	// Match CognitiveLoop's existing account/workdir projection exactly.
+	// Scope is a digest, not a raw Telegram account identifier.
+	const auto accountScope = QString::fromUtf8(QCryptographicHash::hash(
+		(QString::number(accountUserId) + QStringLiteral("|")
+			+ cWorkingDir()).toUtf8(),
+		QCryptographicHash::Sha256).toHex());
+	const auto payload = QJsonObject{
+		{ QStringLiteral("phase"),
+			QStringLiteral("MODEL_NOTIFICATIONS_FLUSHED") },
+		{ QStringLiteral("account_scope"), accountScope },
+		{ QStringLiteral("data_redacted"), true },
+		{ QStringLiteral("peer_notification_count"), counts.peer },
+		{ QStringLiteral("history_notification_count"), counts.history },
+		{ QStringLiteral("message_notification_count"), counts.message },
+		{ QStringLiteral("entry_notification_count"), counts.entry },
+		{ QStringLiteral("topic_notification_count"), counts.topic },
+		{ QStringLiteral("sublist_notification_count"), counts.sublist },
+		{ QStringLiteral("story_notification_count"), counts.story },
+		{ QStringLiteral("ledger_admission"),
+			QStringLiteral("QUEUED_NOT_DURABLE") },
+	};
+	if (!RecordBehaviorAsync(
+		EventType::StateReduce,
+		traceId,
+		QStringLiteral("apo.native.model_notifications"),
+		payload)) {
+		onLedgerAdmissionFailure();
+		return;
+	}
+	// Model notification means re-evaluate the body, not GoalSatisfied.
+	CognitiveLoop::Instance().requestWake(
+		QStringLiteral("native_model_notifications"),
+		traceId,
+		admittedAtMs,
+		accountUserId);
 }
 
 } // namespace apo

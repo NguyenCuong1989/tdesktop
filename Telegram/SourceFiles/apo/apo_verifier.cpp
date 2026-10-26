@@ -91,17 +91,24 @@ VerificationResult ApoVerifier::verifyAction(
 		res.rationale = QStringLiteral("UNKNOWN: INVALID_APO_PREVIOUS_STATE");
 		return res;
 	}
-	// A nonempty provenance string is not proof. Both states must be
-	// consecutive, account-scoped observations restored from the verified
-	// durable ledger. The native dialogs vector cannot authorize other domains.
+	// The native state model is an independently observed input to the
+	// fixed APΩ computation, not the list of Telegram operations. Keep its
+	// provenance check independent from native capability dispatch.
 	const auto accountScope =
 		parameters.value(QStringLiteral("apo_account_scope")).toString();
 	const auto currentTrace =
 		parameters.value(QStringLiteral("apo_current_state_source")).toString();
-	if (actionType != QStringLiteral("dialogs.inspect_server")
-		|| parameters.value(QStringLiteral("apo_state_domain")).toString()
-			!= actionType) {
+	if (parameters.value(QStringLiteral("apo_state_domain")).toString()
+			!= QStringLiteral("dialogs.inspect_server")) {
 		res.rationale = QStringLiteral("UNKNOWN: APO_STATE_DOMAIN_UNSUPPORTED");
+		return res;
+	}
+	// A read-only dialog state pair cannot authorize a different native
+	// capability (notably messages.send_text), even if the caller supplies
+	// the otherwise valid read-domain provenance fields.
+	if (!ApoActionStateDomainMatches(actionType,
+		parameters.value(QStringLiteral("apo_state_domain")).toString())) {
+		res.rationale = QStringLiteral("UNKNOWN: APO_ACTION_STATE_DOMAIN_MISMATCH");
 		return res;
 	}
 	if (!BehaviorLedger::Instance().verifyOmegaStatePair(

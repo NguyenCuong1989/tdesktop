@@ -94,6 +94,14 @@ struct VerificationResult {
 	}
 };
 
+// Bind an observed state model to the only native capability it proves.
+// Read-only dialogs evidence must never be reused to authorize a write.
+[[nodiscard]] inline bool ApoActionStateDomainMatches(
+		const QString &actionType, const QString &stateDomain) {
+	return actionType == QStringLiteral("dialogs.inspect_server")
+		&& stateDomain == actionType;
+}
+
 class ApoVerifier final {
 public:
 	static constexpr double kMinimumTruthThresholdV = 0.9800;
