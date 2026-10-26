@@ -167,6 +167,10 @@ jobs:
               $ledger -notmatch 'event\.timestampMs') {
               throw 'Ledger hash v2 metadata binding or v1 replay compatibility missing'
           }
+          # Every async ledger call must handle admission failure. Preserve the
+          # six native observation sites and detect unguarded future additions.
+          $allAsyncCalls = [regex]::Matches(
+              $runtime, 'RecordBehaviorAsync\(').Count
           $handledAsyncCalls = [regex]::Matches(
               $runtime, 'if \(!RecordBehaviorAsync\(').Count
           if ($ledgerHeader -notmatch 'recordEventAsync\(' -or
@@ -174,7 +178,8 @@ jobs:
               $ledger -notmatch '_limits\.maxAsyncEvents' -or
               $ledger -notmatch 'ASYNC_EVIDENCE_GAP' -or
               $ledgerHeader -notmatch 'bool seal\(' -or
-              $handledAsyncCalls -ne 5) {
+              $handledAsyncCalls -lt 6 -or
+              $allAsyncCalls -ne $handledAsyncCalls) {
               throw 'Bounded off-caller persistence for observational events is missing'
           }
           if ($ledgerHeader -notmatch 'maxLedgerBytes' -or

@@ -5,6 +5,9 @@
 Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram itself (an Active Telegram), not Telegram plus an external agent.
 
 ## Current verified baseline
+
+**Checkpoint 26/10/2026 — post-push CI static-guard repair (Titan `ai`, base HEAD `6c66985f03`):** Git working tree and origin `apo/master` were aligned at `6c66985f03` before the repair. GitHub Actions `40259223348` and `40259218819` both failed in `Check Native Ledger and Executor Static Guards`: workflow expected exactly five `if (!RecordBehaviorAsync(` sites while current `apo_runtime.cpp` has six. Updated the existing `.github/workflows/apo-review.yml` to require at least six guarded observational call sites and reject any unguarded `RecordBehaviorAsync(` invocation. Extracted the actual workflow step and executed it locally on Titan: `CURRENT_GATE_EXIT=PASS`, `ASYNC_ALL=6`, `ASYNC_GUARDED=6`; an added unguarded-call negative fixture was rejected. Existing `apo_behavior_audit_test.ps1` PASS, `apo_ledger_smoke.ps1` complete native MSVC/Qt suite PASS, `git diff --check` exit 0. This proves the local static gate and existing regression checks, NOT remote CI or native E2E. The new `APΩ Native x64 Debug Build` run `40259218797` and other platform CI runs were still active at inspection; do not launch duplicate builds. Existing Telegram PIDs `45880`, `79692`, `127932` preserved. Alpha Studio tunnel was live/ready but MCP initialize/tools-list health was not confirmed; Chat Desktop MCP local tunnel could not start because its existing DPAPI key file was absent, and no replacement secret was created. Product remains NOT_ACCEPTED; next mission gate remains authenticated account binding and native write producer → ACK → observed state → recovery.
+
 - Canonical local repo: `C:\Users\pc\Documents\GitHub\tdesktop`
 - Product branch: `apo/master`
 - `origin`: `NguyenCuong1989/tdesktop`
