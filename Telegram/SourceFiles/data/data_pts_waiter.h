@@ -7,6 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include <deque>
+#include <functional>
+
 namespace Api {
 class Updates;
 } // namespace Api
@@ -26,6 +29,7 @@ public:
 	void init(int32 pts) {
 		_good = _last = _count = pts;
 		clearSkippedUpdates();
+		_deferredApply.clear();
 	}
 	bool inited() const {
 		return _good > 0;
@@ -34,6 +38,7 @@ public:
 		_requesting = isRequesting;
 		if (_requesting) {
 			clearSkippedUpdates();
+			_deferredApply.clear();
 		}
 	}
 	bool requesting() const {
@@ -92,6 +97,7 @@ private:
 	base::flat_map<uint64, PtsSkippedQueue> _queue;
 	base::flat_map<uint64, MTPUpdate> _updateQueue;
 	base::flat_map<uint64, MTPUpdates> _updatesQueue;
+	std::deque<std::function<void()>> _deferredApply;
 	int32 _good = 0;
 	int32 _last = 0;
 	int32 _count = 0;

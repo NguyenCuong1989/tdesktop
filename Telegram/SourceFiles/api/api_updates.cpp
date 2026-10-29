@@ -61,6 +61,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_streamed_drafts.h"
 #include "history/history_unread_things.h"
 #include "core/application.h"
+#include "apo/apo_runtime.h"
 #include "storage/storage_account.h"
 #include "storage/storage_facade.h"
 #include "storage/storage_user_photos.h"
@@ -1317,6 +1318,9 @@ void Updates::applyUpdatesNoPtsCheck(const MTPUpdates &updates) {
 }
 
 void Updates::applyUpdateNoPtsCheck(const MTPUpdate &update) {
+	// Capture provenance before native handlers can invoke reentrant observers
+	// (including account/session transitions) during message updates.
+	const auto accountUserId = session().userId().bare;
 	switch (update.type()) {
 	case mtpc_updateNewMessage: {
 		const auto &d = update.c_updateNewMessage();
@@ -1497,11 +1501,37 @@ void Updates::applyUpdateNoPtsCheck(const MTPUpdate &update) {
 
 	default: Unexpected("Type in applyUpdateNoPtsCheck()");
 	}
+	// The native update handler returned; consumers may still be queued.
+	// This is distinct from independently verified observed model state.
+	apo::HookServerUpdate(
+		QStringLiteral("MTPUpdate"),
+		QJsonObject{
+			{ QStringLiteral("phase"),
+				QStringLiteral("NATIVE_HANDLER_RETURNED") },
+			{ QStringLiteral("constructor_id"),
+				static_cast<qint64>(update.type()) },
+		},
+		accountUserId);
 }
 
 void Updates::applyUpdates(
 		const MTPUpdates &updates,
 		uint64 sentMessageRandomId) {
+	// APΩ sensory ingress only. Telegram may still reject a duplicate,
+	// queue a seq/PTS gap, or defer model mutation. Do not label this
+	// envelope as APPLIED or infer a server-observed postcondition.
+	apo::HookServerUpdate(
+		QStringLiteral("MTPUpdates"),
+		QJsonObject{
+			{ QStringLiteral("phase"),
+				QStringLiteral("RECEIVED_PRE_NATIVE_APPLY") },
+			{ QStringLiteral("envelope_type"),
+				static_cast<qint64>(updates.type()) },
+			{ QStringLiteral("sent_random_id"),
+				static_cast<qint64>(sentMessageRandomId) }
+			},
+		session().userId().bare);
+
 	const auto randomId = sentMessageRandomId;
 
 	switch (updates.type()) {
@@ -1627,6 +1657,18 @@ void Updates::applyUpdates(
 }
 
 void Updates::feedUpdate(const MTPUpdate &update) {
+	// Preserve the concrete native update constructor before any PTS/seq
+	// handling can defer, reject or apply it. This is sensory ingress,
+	// never evidence of a completed Telegram model-state transition.
+	apo::HookServerUpdate(
+		QStringLiteral("MTPUpdate"),
+		QJsonObject{
+			{ QStringLiteral("phase"),
+				QStringLiteral("RECEIVED_PRE_NATIVE_ROUTING") },
+			{ QStringLiteral("constructor_id"),
+				static_cast<qint64>(update.type()) },
+		},
+		session().userId().bare);
 	switch (update.type()) {
 
 	// New messages.

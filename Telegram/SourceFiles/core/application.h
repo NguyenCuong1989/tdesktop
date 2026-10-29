@@ -494,6 +494,8 @@ private:
 
 	rpl::event_stream<> _materializeLocalDraftsRequests;
 
+	// Scoped to the current active Telegram account, never background accounts.
+	std::unique_ptr<rpl::lifetime> _apoCreditsLifetime;
 	rpl::lifetime _lifetime;
 
 	crl::time _lastNonIdleTime = 0;

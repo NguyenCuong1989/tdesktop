@@ -1,0 +1,312 @@
+> **Ω-Telegram MISSION LOCK — mandatory before all work:** Read `docs/omega-telegram-mission-lock.md` (from repository root) and follow its fixed A→B→C→D gates. Current body is NOT ACCEPTED. Do not introduce LLM, external controllers, parallel runtime or claim unverified PASS.
+
+# Ω-Telegram Next Session Checklist
+
+Canonical identity: the forked Telegram Desktop source/runtime is Ω-Telegram itself (an Active Telegram), not Telegram plus an external agent.
+
+## Current verified baseline
+
+**Checkpoint 26/10/2026 — native cross-account sensory wake preservation (Titan `ai`, base HEAD `0329569896`):** In `apo_cognitive_loop.cpp`, `requestWake()` previously cleared a pending coalesced wake without ledger evidence when an event from a different account arrived. Reused the existing durable `NATIVE_SENSORY_WAKE_UNRESOLVED` structure through `persistPendingWake()`: account-bound prior ingress is recorded as `PENDING / NOT_REPLAYED_ACCOUNT_SWITCH_NO_ACTION` before switching scopes; a failed persistence attempt stops the cognitive loop without dispatch. Orderly shutdown still records `PENDING / NOT_REPLAYED_NO_ACTION`. Added isolated synthetic cross-account native fixture to the existing `apo_native_ui_smoke_scenario.cpp`. Full MSVC native overlay compile/link, real `Telegram.exe -testagent` launch and native scenario `SCENARIO_RESULT: PASS (failures: 0)`; test binary SHA-256 `3DB22D4D75A27C3585F7019B1D30C51BBE3535B16A9BDEE172081D7A91C9F83C`. Script restored original `test_scenario.cpp` SHA-256 `CD6FAB91823BE06066B9002268A0C4A480D411AD2EF235C7A22D02931718122D`, rebuilt restored binary SHA-256 `9B5B175DB41BDE02B26F5F904512A665CBE6F576E68EE6766AE8523F103B6580`; native runner EXIT 0. Run-scoped evidence at `out/apo_native_ui_smoke_fixture/run-cd59e81d92bf46eeb76afae55e52176b`. `apo_behavior_audit.ps1`: 29 v2 events, 0 parse/sequence/hash-link/SHA-256 errors, exactly one `NOT_REPLAYED_ACCOUNT_SWITCH_NO_ACTION` and one orderly shutdown `NOT_REPLAYED_NO_ACTION`. `git diff --check` 0 errors (line-ending warning only). Existing Telegram sessions PID 45880/79692/127932 were not terminated. **BOUNDARY:** fixture uses synthetic account provenance in a disposable unauthenticated Telegram profile; does NOT prove real authenticated account-switch reachability or live send / ACK / observed write / recovery. **BodyPASS NOT_ACCEPTED.**
+
+
+**Checkpoint 26/10/2026 — post-push CI static-guard repair (Titan `ai`, base HEAD `6c66985f03`):** Git working tree and origin `apo/master` were aligned at `6c66985f03` before the repair. GitHub Actions `40259223348` and `40259218819` both failed in `Check Native Ledger and Executor Static Guards`: workflow expected exactly five `if (!RecordBehaviorAsync(` sites while current `apo_runtime.cpp` has six. Updated the existing `.github/workflows/apo-review.yml` to require at least six guarded observational call sites and reject any unguarded `RecordBehaviorAsync(` invocation. Extracted the actual workflow step and executed it locally on Titan: `CURRENT_GATE_EXIT=PASS`, `ASYNC_ALL=6`, `ASYNC_GUARDED=6`; an added unguarded-call negative fixture was rejected. Existing `apo_behavior_audit_test.ps1` PASS, `apo_ledger_smoke.ps1` complete native MSVC/Qt suite PASS, `git diff --check` exit 0. This proves the local static gate and existing regression checks, NOT remote CI or native E2E. The new `APΩ Native x64 Debug Build` run `40259218797` and other platform CI runs were still active at inspection; do not launch duplicate builds. Existing Telegram PIDs `45880`, `79692`, `127932` preserved. Alpha Studio tunnel was live/ready but MCP initialize/tools-list health was not confirmed; Chat Desktop MCP local tunnel could not start because its existing DPAPI key file was absent, and no replacement secret was created. Product remains NOT_ACCEPTED; next mission gate remains authenticated account binding and native write producer → ACK → observed state → recovery.
+
+- Canonical local repo: `C:\Users\pc\Documents\GitHub\tdesktop`
+- Product branch: `apo/master`
+- `origin`: `NguyenCuong1989/tdesktop`
+- `upstream`: `telegramdesktop/tdesktop` (push disabled)
+- APΩ native source exists under `Telegram/SourceFiles/apo/`.
+- MTProto request/response hooks exist at source level.
+- Native unread projection exists at source level.
+- APO candidate state is dynamic rather than fixed S1.
+- Action lifecycle types exist: PLANNED → VERIFIED → SENT → ACKNOWLEDGED → OBSERVED → CLOSED.
+- Reference Python suite is a reference/spec check only; never call it SYSTEM PASS.
+
+## Nghiệm thu cuốn chiếu theo chức năng — bằng chứng 25/10/2026
+
+**Checkpoint 06:18, 26/10/2026 (Titan `ai`, HEAD `d66089374a`, ahead remote 13):** Native Debug staging build previously started for ACK request-id guard completed and produced `out/apo_native_stage_20261026_ackrequest/Telegram.exe` (539,796,480 bytes; SHA-256 `97029FFD53F8965890771E481D516B261841477B5684258CABF31AE6D692D3C1`). MSBuild log ends in `Telegram.vcxproj -> .../Telegram.exe`; no MSBuild/cl/link/CMake/Ninja process remains. Unique unauthenticated `-many -workdir` launch PID 108272 displayed `Telegram • Ω-Telegram`, responded, and closed gracefully; protected Telegram PIDs 45880 and 79692 remained running. Isolated RAW ledger audit: 19 v2 events, 0 parse/sequence/prev-hash/SHA-256 errors, 7 MTProto requests, 2 correlated responses, 5 unmatched requests, 0 authenticated state observations, 0 APΩ planned/sent/ACK/observed/closed actions. Native MSVC/Qt `apo_ledger_smoke.ps1`: `SMOKE_EXIT=0`, all regression checks PASS, including send correlation and recovery. `git diff --check` exit 0 (line-ending warnings only). GitHub Actions native run 39176873968 and newer native 39517111373 SUCCESS, but remote CI does not include uncommitted local changes; latest checked run list still dates 20/10/2026. 26 existing modified files retained; no commit/push or duplicate build. **Next required gate:** source-grounded producer and write-domain evidence for `messages.send_text`, then authenticated native send with same-action server ACK, independently observed state and restart/replay. **BodyPASS = NOT_ACCEPTED.**
+
+**Checkpoint 23:27 (Titan, HEAD d66089374a, ahead remote 13):** Fixed a verifier cross-capability evidence-laundering gap without changing sealed Ω(P) equations: a `messages.send_text` caller could otherwise present `apo_state_domain=dialogs.inspect_server` and its valid read-only state pair to the action verifier. `ApoActionStateDomainMatches` now binds the only accepted observed state domain to the matching read-only action; the verifier returns `UNKNOWN: APO_ACTION_STATE_DOMAIN_MISMATCH` for write/foreign actions. Added 5 native C++ positive/negative binding cases to the existing MSVC/Qt ledger smoke; complete ledger smoke PASS, including durable send-ACK failure/reopen regression. Full Debug native staging build EXIT 0, `out/apo_native_stage_20261025_domainbind/Telegram.exe`, 539791360 bytes, SHA-256 `C46F5313BF322A9CCAE586C66A9BD8CDEA87DB7A2127451759224491263DE197`. Unique no-login profile launched PID 62744 and closed gracefully; test-only forced crash PID 72688 and restart PID 9980 preserved ledger 19→61, audit exit 0 with 0 parse/sequence/hash/link errors. Official Telegram PID 45880 and protected fork PID 79692 untouched. Alpha Studio MCP status available, chat returned HTTP 503; Chat Desktop MCP `list_sessions` worked. No native send, server ACK, write postcondition or action replay tested; `messages.send_text` producer and write-domain verifier evidence remain BLOCKED. No commit/push. **BodyPASS = NOT_ACCEPTED.**
+
+**Checkpoint 22:28 (Titan, local HEAD d66089374a, ahead remote 13):** Sửa trực tiếp approval prompt hiện hữu của `messages.send_text` để giữ nguyên toàn bộ target và nội dung dự kiến gửi (trước đó target bị cắt 120 ký tự, nội dung không hiện). Helper UI-only `NativeSendApprovalPreview` được kiểm bằng MSVC/Qt native ledger smoke, gồm target dài 165 ký tự, tin nhắn hai dòng và ký tự đặc biệt; toàn bộ smoke PASS, `git diff --check` không lỗi. Native Debug staging BUILD EXIT 0: `out/apo_native_stage_20261025_approval/Telegram.exe`, 539789824 bytes, SHA-256 `38AB49FACC6C8A29F1760C1E39B04C805097CD6A33CC3B99E69D1211C32B28F7`. Launch no-auth profile mới, PID 73200 phản hồi, đóng cửa sổ bình thường; protected PID 63836 còn sống. Audit 27 RAW events, 0 parse/sequence/hash/link errors, 8 MTProto requests, 3 correlated responses, 5 pending, 4 sensory wakes, **0 APΩ write/ACK/observed action**. **Approval prompt chưa được render trong UI đăng nhập thật**: đây là source+isolated helper test, không phải nghiệm thu Creator approval. Blocker nguồn bổ sung: `apo_verifier.cpp` chỉ cho `apo_state_domain=dialogs.inspect_server`, còn `apo_cognitive_loop.cpp` chỉ submit `dialogs.inspect_server`; `messages.send_text` không có producer/evidence domain được nghiệm thu và direct MTProto bypass native `ApiWrap` optimistic pipeline. Không nới verifier bằng trạng thái dialogs để hợp thức hóa send. 4 tệp source/test thay đổi vẫn nằm trong working tree cũ; không commit/push. **BodyPASS = NOT_ACCEPTED.**
+
+Mỗi chức năng tiến từ SOURCE → BUILD → TEST → NATIVE → OBSERVED và chỉ được CLOSED khi kết quả bản địa khớp điều kiện đã xác lập. Các trạng thái dưới đây **không** đồng nghĩa `BodyPASS`; bằng chứng quá khứ không tự động chuyển thành PASS cho binary/phiên hiện tại.
+
+| Chức năng / cơ quan | Mức bằng chứng đã đạt | Cổng chưa đạt |
+| --- | --- | --- |
+| Khởi động native + cửa sổ + mở QR đăng nhập | `-testagent` trên binary staging riêng: **23 TEST_RESULT PASS**, `SCENARIO_RESULT: PASS (failures: 0)`, APΩ chạy trong tiến trình, test source được khôi phục nguyên byte, PID Telegram cũ không bị tác động. | Đăng nhập tài khoản thật, duy trì phiên và sử dụng đầy đủ UI sau đăng nhập: NOT_RUN |
+| MTProto request/response không xác thực | Binary SHA-256 `FFB97948BF43B8F43501138013C524AC3E91696E4A23AED127FFD108CC2A60A7`: 7 request, 5 response đối chiếu cùng request ID, 2 request chưa trả lời lúc đóng test; 23 ledger events, 0 parse/sequence/hash/link errors. | Các request chưa hồi đáp là pending, authenticated domains và hậu điều kiện còn NOT_RUN |
+| Đọc `messages.getDialogs` trên tài khoản | **HISTORICAL OBSERVED** 23/10: 14 vòng có ACK → native state match 16/16 → `STATE_CONFIRMED` → `CLOSED` theo cùng action/request ID. | Không được dùng kết quả lịch sử làm chứng cứ phiên 25/10: StateBridge ledger hiện `has_user_identity=false`; tái nghiệm thu trên binary mới BLOCKED |
+| PTS nhận, xếp hàng, chống trùng, tái nhập | MSVC BUILD+TEST **11/11 PASS** biên dịch chính `data_pts_waiter.cpp` và `base::flat_map` gốc; 100 hoán vị có seed cố định, 3.200 callback kiểm tra đúng thứ tự/không trùng. Copilot `ACCEPT_TEST_SOURCE`. | Authenticated Api::Updates → Data::Session → RAW ledger/cross-account còn NOT_RUN |
+| Thông báo thay đổi Peer/History/Message/Entry/Topic/Sublist/Story | SOURCE và MSVC BUILD PASS; bảy số đếm đã khử nội dung, guard theo tài khoản, bản staged như trên đã thử crash/restart cách ly. | Nonzero events từng cơ quan, reentrant logout, đo burst và state thật còn NOT_RUN |
+| Danh tính phiên và StateBridge | PID được bảo vệ `63836` có persisted event `bridge has_user_identity=false`; nhiều khả năng không có active native session, nhưng đây **không** phải bằng chứng logout hoàn toàn. Test-only `state-bridge-profile-persistence-failure` PASS trong ledger smoke: identity tổng hợp `101` có `NativeBodyProjection`, ledger seal trước switch tổng hợp `102`, switch fail-closed về identity `0` và xóa projection/balances cũ. | Chưa sửa source session wiring; cần active-session diagnostic trên phiên đã xác thực. Test tổng hợp không chứng minh đăng nhập xác thực. |
+| Native identity transition | `core/application.cpp` phát event đã khử nội dung từ `activeSessionChanges`, actor `apo.native.identity_transition`, chỉ gồm `active_has_session`, `accounts_authed`, `bridge_has_identity`, `bridge_matches_native`, `diagnostic_status`; nếu `RecordBehavior` lỗi chỉ phát static `qWarning`. SOURCE SHA-256 `760D7F8D794D79B67BCA60E5AE86D33999782D5B807E902F3C87FBBE1A091ECB`; MSVC Debug staging BUILD PASS, binary SHA-256 `B816627F2708CBCA0F60428FDDE07AE9593562BC2EA9220DBF9B04727A4C7F62`, 539750912 bytes. | Chỉ authenticated active-session/switch/recovery mới đóng được diagnostic gate; source/build không chứng minh đường phiên xác thực. |
+| Gửi `messages.send_text` | Copilot SOURCE audit xác định raw MTProto path đang bỏ qua optimistic local-message pipeline chuẩn của `ApiWrap`; **chưa đạt native test** và không dispatch trong phiên này. | Chưa chứng minh request/random_id/local item/ACK/observed/restart; chỉ thử gửi thật sau khi Creator phê duyệt đích và thao tác; việc tích hợp source không đồng nghĩa quyền dispatch. |
+| Cảm giác MTProto → đánh thức → PENDING → restart (chưa xác thực) | Hai lượt runtime thật trong profile cách ly: 25 tín hiệu MTProto, 9 marker `NATIVE_SENSORY_WAKE`, **9/9** có dấu vết nguồn trước đó; 23 tín hiệu đã được gộp; hai tín hiệu cuối còn chờ timer 250 ms trước shutdown. Fixture native `-testagent` chứng minh đường dừng chủ động ghi `NATIVE_SENSORY_WAKE_UNRESOLVED` (`PENDING`, `NOT_REPLAYED_NO_ACTION`) trước ledger seal; chưa lặp lại chính xác cửa sổ 118 ms của traffic tự nhiên sau bản sửa. Native `-testagent` **32/32 PASS**, 0 lỗi; bản gốc `test_scenario.cpp` được khôi phục. Restart cùng profile với binary đã restore: ledger **26→60** events, marker PENDING lịch sử giữ **1/1**, **6 wake mới**, **0 trace cũ bị replay**, **0 native executor action**, kiểm toán 0 lỗi, hai Telegram PID `45880/63836` nguyên vẹn. | Đây chỉ là nghiệm thu anonymous sensing + orderly-stop + no-replay. **Chưa đạt** ingress còn trong Qt queued callbacks lúc seal, lỗi ghi ledger, đổi tài khoản thật, verified reflex→native action→observed result; source production vẫn dirty/uncommitted. |
+
+**Dòng bằng chứng native UI tiền nhiệm (trước wake/PENDING):** `apo_native_ui_smoke.ps1` runner SHA-256 `3D5E58018A305F000C7CF51B08F58DD61C29BC58E4BCEBCDA8439BBDA060EDF3`, scenario nguồn SHA-256 `87DACA5751B0751CB149DE06294D1EEDEC682CF5962B10ACC0D992E3647C09D7`, binary overlay SHA-256 `A00A40DE2C8B370E21E3C38FA41823486AC81EE0A81335F5D1BB69DE8B24D50F`, restore source SHA-256 `CD6FAB91823BE06066B9002268A0C4A480D411AD2EF235C7A22D02931718122D`; full script exit 0, 23/23 native test assertions PASS; `test_scenario.cpp` khôi phục đúng HEAD. Test profile/evidence run-scoped GUID ở `out/apo_native_ui_smoke_fixture/run-74624df057604ff8a4693031efabbca3`, không dùng profile thật, không xóa đệ quy, không ghi đè thay đổi đồng thời.
+
+**Dòng bằng chứng native mới nhất:** `apo_native_ui_smoke_scenario.cpp` SHA-256 `C05D7DC923E3F75526D83DA61CF835E14196D4A43CFB68AA864D0AD55E05687D`, `apo_cognitive_loop.cpp` SHA-256 `AC89B77064CAC71812A8F187062B87326A1ED369F32BF55397DD8539D995246A`; run `out/apo_native_ui_smoke_fixture/run-429eafae2e724b7092d5debfa7e9608e` đạt 32/32 native assertions, `SCENARIO_RESULT: PASS (failures: 0)`, `test_scenario.cpp` khôi phục đúng HEAD; binary restored SHA-256 `EA75A610E49AEF62CA1812A50C10558BBBD0FE37930605040EED9ABE2A4E6372`. Sau restart cùng profile: 1 marker PENDING cũ giữ nguyên, 6 wake mới không dùng lại trace cũ, 0 executor action, audit exit 0 trên 60 ledger events. **SOURCE/BINARY và runtime của phiên không đăng nhập**, chưa xác nhận authenticated organs hoặc hàng đợi Qt sát shutdown. Hạn chế mới do Copilot SOURCE QA: callback worker thread có thể chưa chạy trước `Runtime::stop()`/ledger seal, cần thử deterministic queued ingress, không tự đánh dấu PASS.
+
+**Độ tin cậy của lịch sử:** full `apo_behavior_audit.ps1 -MaxEvents 700000` trên profile hiện hữu kiểm tra **635.050** bản ghi, exit 0, lỗi parse/sequence/hash/link đều bằng 0. Đây là PASS cho tính toàn vẹn ledger, không phải PASS cho tất cả hành vi.
+
+**PTS counterexample — chưa đóng cổng:** chạy executable test-only với `--probe-reentrant-arrival` (biên dịch source PTS gốc) đo `apply=11,14,12,13`, `current=13`, `PTS_HANDLER_RETURNED=14,11,12,13`, probe **exit 1** theo thiết kế. 11 ca kiểm thử mặc định vẫn PASS. Đây là `SOURCE/TEST BEHAVIORAL HAZARD` khi callback nhận lồng một PTS mới trong lúc drain; chưa có bằng chứng tình huống này phát sinh ở runtime native thật. Không tự sửa công thức APΩ hay thay PtsWaiter upstream khi chưa chứng minh đường gọi native thực tế. Bước kế: trace native `Api::Updates::applyUpdateNoPtsCheck()` có thể tái nhập cùng waiter hay không, rồi thêm phép thử trong `-testagent` nếu thật sự khả thi.
+
+**Checkpoint mới — 25/10/2026:** `apo_ledger_smoke.ps1` hoàn tất **35 functional assertions** và final suite marker; fixture persistence-failure tạo ledger tổng hợp 6 events đã khử nội dung, không có sensitive payload. Profile no-login cách ly `out/apo_identity_final_0eda6c02ecff4f44a5b721ec086c81d5` ghi đúng một `identity_transition` ở seq `7`: `accounts_authed=0`, `active_has_session=false`, `bridge_has_identity=false`, `bridge_matches_native=false`, `diagnostic_status=NO_AUTHED_SESSION`. Toàn ledger có đúng 24 events; audit exit `0`, lỗi parse/sequence/hash/link đều `0`; binary hash không đổi. Hai PID Telegram ban đầu `45880` và `63836` không bị tác động. Đây chỉ xác nhận unauthenticated diagnostic path, không xác nhận authenticated session switch/recovery. Historical 14 `getDialogs` CLOSED ngày 23/10 không phải bằng chứng runtime hiện tại. PTS reentrant probe vẫn synthetic-only; `BodyPASS` vẫn **NOT_ACCEPTED**.
+
+**Cổng tiếp theo:** (1) trên fixture được Creator cho phép, đo active-session diagnostic qua login/switch/restart và đối chiếu native session với bridge; (2) nối code send vào pipeline chuẩn `ApiWrap` và nghiệm thu bằng fixture trước; chỉ thực hiện send live sau phê duyệt của Creator, chứng minh `action_id ↔ request/random_id ↔ optimistic local item ↔ ACK ↔ observed state ↔ restart reconciliation`; (3) trace và thử reachability callback PTS tái nhập trong native `Api::Updates`, không nâng synthetic probe thành runtime fact.
+
+## Gate 0 — Repository hygiene
+- [ ] For delegated work, apply the `Multi-agent collaboration work envelope` in `docs/apo-development-workflow.md`; reject missing mission mappings, inherited safety constraints, per-check measurements/logs/lineage, or individual outcomes.
+- [ ] Never delegate Phase D/LLM work without a recorded explicit full `BodyPASS`; the current body is **NOT ACCEPTED**.
+- [ ] Working tree clean before sync/build.
+- [ ] `git fetch upstream dev --prune`.
+- [ ] Confirm `apo/master` is based on current `upstream/dev`.
+- [ ] `git submodule sync --recursive`.
+- [ ] `git submodule update --init --recursive`.
+- [ ] `git diff --check upstream/dev...HEAD` = 0 errors.
+
+## Gate 1 — Native Windows toolchain
+- [ ] Follow current upstream `docs/building-win.md`; do not substitute unsupported toolchains by guess.
+- [ ] Visual Studio toolchain required by current upstream is installed and discoverable.
+- [ ] Required Windows SDK is installed.
+- [ ] Python version required by upstream build docs is installed.
+- [ ] `cmake`, compiler environment and upstream prepare scripts are available.
+
+## Gate 2 — Native compile
+- [ ] Run Telegram upstream prepare/configure sequence with legitimate Telegram API credentials supplied locally, never logged or committed.
+- [ ] Configure x64 build.
+- [ ] Compile Ω-Telegram native binary.
+- [ ] Compiler errors = 0.
+- [ ] Linker errors = 0.
+- [ ] Record commit SHA, build configuration, toolchain version and binary hash.
+
+## Gate 3 — Launch as Ω-Telegram
+- [ ] Launch the fork binary, not the Microsoft Store Telegram binary.
+- [ ] Before and after any updater or restart, verify the protected fork binary SHA is unchanged, the relaunched process uses that same binary, APΩ runtime/ledger resumes, and no official Telegram update is installed. Any hash mismatch is `BLOCKED/FAIL`; passing this check is native build/restart evidence only, never whole `BodyPASS`.
+- [ ] Use a separate/controlled data directory first; do not modify or copy authentication secrets blindly.
+- [ ] Login/session works.
+- [ ] Dialog list, chats, groups, channels, bots, media, search, settings and normal Telegram UX still work.
+- [ ] Close/restart preserves valid session/state.
+
+## Gate 4 — Real telemetry baseline
+Every PASS below must include numbers.
+- [ ] PTS direct path: prove one accepted update returns from its native handler and records account-scoped `PTS_HANDLER_RETURNED` exactly once.
+- [ ] PTS queued path: prove a gapped update remains unreported until drain, then records account-scoped `PTS_HANDLER_RETURNED` exactly once.
+- [ ] PTS duplicate path: prove a duplicate/stale update does not create another handler-return event.
+- [ ] PTS gap handling: prove the missing range is recovered or remains explicitly pending without false application evidence.
+- [ ] PTS drain: prove multiple queued entries drain safely, in order, without iterator invalidation or cross-account attribution.
+- [x] **Isolated actual-source control-flow test**: `Telegram/build/apo_pts_waiter_smoke.ps1` compiled current `data_pts_waiter.cpp` plus REAL `base::flat_map` and produced 7/7 PASS (2026-10-25); independent Copilot `ACCEPT_SOURCE_TEST`. This checks only the isolated control-flow boundary, **not** authenticated native PTS/model-state observations. Re-run on each PTS source change.
+- [ ] Distinguish SOURCE + MSVC BUILD + isolated unauthenticated restart (2026-10-25, SHA-256 `D62FDE97A223A0676420DA0C0B39693D682AC5CBFA3E4BBD87BECB4151434D2D`, ledger 77 valid events) from **NOT_RUN** authenticated direct/queued PTS, cross-account and native model-state postconditions. The queue-safety patch is source-reviewed but does not pass these runtime gates.
+- [ ] Native `Data::Changes` batch hook: verify exactly one `MODEL_NOTIFICATIONS_FLUSHED` marker **after** seven batched notification streams, no marker on no-op and separate follow-up flushes for reentrant updates; no assumption this means `MODEL_STATE_CONFIRMED`.
+- [ ] Account and lifecycle safety of native model-change hook: active session matches source, no cross-account attribution, no crash on empty domain/logout or queued callback after stop, no plaintext peer/message/story identifiers in ledger.
+- [ ] Burst/backpressure gate: measure model-notification flush count, queued ledger admission vs durable writes, dropped/rejected events, 250ms wake coalescing, CPU/latency and failure recovery; do not mark as native PASS from unauthenticated startup alone.
+- [x] Source/build check for seven redacted **batched model-notification category counts** and pre-callback account capture: Copilot `ACCEPT_SOURCE`, host MSVC Debug build PASS; staged SHA-256 `FFB97948BF43B8F43501138013C524AC3E91696E4A23AED127FFD108CC2A60A7`. Fresh unauthenticated native crash/restart audit `25` valid events, zero parse/sequence/hash/link failures. No logged-in category notifications were produced.
+- [ ] Authenticated native count verification: match Peer/History/Message/Entry/Topic/Sublist/Story counters to actual emitted coalesced notifications for each category; test logout during callback, reentrant follow-up batch, account switching, queue admission versus durable ledger and runtime memory safety. Build and unauthenticated startup alone cannot close this gate.
+- [ ] Native lifecycle events captured: expected / captured / missing / duplicate.
+- [ ] MTProto requests: total, response match rate, errors, orphan request IDs.
+- [ ] MTProto latency: p50/p95/p99.
+- [ ] Server updates: expected/captured and dropped-event rate.
+- [ ] UI events/state transitions: captured count and mismatch count.
+- [ ] Unread projection: Telegram native unread vs APΩ state mismatch = 0.
+- [ ] Behavior ledger: event count, sequence gaps, duplicate sequences, hash-chain integrity.
+- [ ] CPU, RAM, disk I/O, startup time, shutdown flush time.
+
+## Gate 5 — Fix lifecycle truth
+Current source must not claim ACKNOWLEDGED/OBSERVED/CLOSED merely by advancing labels.
+- [ ] SENT only after a native Telegram operation is actually dispatched.
+- [ ] ACKNOWLEDGED only from matching MTProto/server acknowledgement.
+- [ ] OBSERVED only after matching Telegram state/update confirms the external result.
+- [ ] CLOSED only when expected state equals observed state.
+- [ ] Crash/restart reconciles SENT-but-not-OBSERVED actions before retry.
+
+## Gate 6 — Native action integration
+- [ ] Replace placeholder `compute.draft_reply` execution path with a real, bounded native Telegram operation or a harmless test action first.
+- [ ] Map `action_id ↔ request_id ↔ response/update ↔ state delta`.
+- [ ] Preserve `Capability != Authority` invariant.
+- [ ] Never expose Telegram OTP, auth keys, session secrets, API hash, bot tokens, wallet seeds/private keys in telemetry or logs.
+
+## Gate 7 — Ω(P) from real Telegram state
+- [ ] Define and document the real telemetry-to-`(C,R,E,B)` mapping.
+- [ ] Record S0/S1/D0/D1/diff0/diff1/V0/V1/ΔD/ΔV per decision.
+- [ ] APO PASS requires metrics, not a label.
+- [ ] Compare decision outcome with observed Telegram result and feed that back into state/economy/trust.
+
+## Gate 8 — End-to-end closed loop
+- [ ] Real native event → raw telemetry.
+- [ ] Telemetry → state reduction.
+- [ ] State → computation/decision.
+- [ ] Decision → Ω(P) verification.
+- [ ] Authority → native Telegram dispatch.
+- [ ] Server response/update → observed result.
+- [ ] State/UI/memory update.
+- [ ] Closed-loop completion rate measured over repeated trials.
+
+## Gate 9 — Operational resilience
+- [ ] Long-run soak test with metrics.
+- [ ] Network degradation/reconnect test.
+- [ ] Crash recovery test.
+- [ ] Update/rebase test against new upstream.
+- [ ] No loss of Telegram core functionality.
+
+## Gate 10 — Contributor loop
+For every generic defect discovered by Ω-Telegram telemetry:
+- [ ] Reproduce on clean `upstream/dev`.
+- [ ] Capture before metrics.
+- [ ] Create a minimal generic fix branch from `upstream/dev` (not from APΩ product history).
+- [ ] Add regression test when feasible.
+- [ ] Capture after metrics.
+- [ ] Keep APΩ-specific code out of the upstream patch.
+- [ ] Submit PR upstream with reproduction, root cause, before/after evidence and platform/toolchain details.
+- [ ] After upstream merge, resync Ω-Telegram and remeasure telemetry baseline.
+
+## Definition of operational Ω-Telegram
+Do not call SYSTEM/PRODUCT PASS until this chain is measured on the fork binary:
+
+`Install/Build → Launch → Login → Full Telegram UX → Observe → Compute → Decide → Ω(P) → Native Execute → Server Acknowledge → Observed State → UI/Memory Update → Persist → Recover`
+
+The controlling benchmark is telemetry, and telemetry must connect fork evolution back to upstream contribution.
+
+## Mission execution contract and evidence checkpoint — 2026-10-19
+
+**Historical Creator-defined invariant:** build the existing official Telegram Desktop native fork into Ω-Telegram, a fully functional Telegram client with APΩ/Telegram Economy mathematical engines and useful code-based autonomous features. No standalone bot, wrapper, replacement desktop, or new orchestrator. The historical statement that ChatGPT coordinates existing tools and an LLM is optional is superseded by the Mission Lock: Phase D/LLM work is forbidden until a recorded explicit full `BodyPASS`; the current body is **NOT ACCEPTED**.
+
+**Fixed evaluation chain:** Source → Build → Runtime → Native Telegram Action → Server ACK → Observed State → Ledger Replay → Measured User Value. A passing reference fixture, static guard, successful compile, or CI label is evidence for only its own level, never product completion.
+
+**Observed source and Git progression:**
+- Repository: `C:\Users\pc\Documents\GitHub\tdesktop`, branch `apo/master`.
+- `4a9aee0ae4`: removed fabricated Executor success, guarded durable ledger and MTProto parser receipt, reduced telemetry exposure, corrected CI labels.
+- `02f2d228cb`: placed mandatory Ω verifier inside Executor and required persisted verification before proceeding.
+- `b68c0adbdc`: isolated native unread/profile state by active Telegram account.
+- Native Credits wiring (Stars + Telegram in-app TON, not an external TON wallet) and a self-contained APΩ integer type were inspected as **working-tree changes**, not a released feature, at this checkpoint.
+
+**Executed evidence on Titan:**
+- Official `win.bat skip-release silent` returned exit code 0 with all 35/35 upstream stages skipped from valid prepared state.
+- Official native x64 Debug CMake configure with Telegram test API returned exit code 0, producing `tdesktop/out`.
+- MSVC 19.44/Qt 5.15.19 `cl /Zs` compiler checks of eight APΩ native `.cpp` modules returned exit code 0.
+- Generated native `Telegram.vcxproj` explicitly includes APΩ Ledger, CognitiveLoop and Executor compilation units.
+- Reference Python suite: 45 tests passed; static and Ω fixture gates passed. These do not establish native runtime.
+- Native Debug compilation started on Titan, with output under `tdesktop/out/omega-native-debug-build.log`; final compiler/linker result was **not yet available at this checkpoint**.
+- GitHub native Debug workflow: run `39177160836`; inspect its completed status and artifact before citing it as evidence.
+
+**Native ledger restart/corruption smoke (Titan):** `Telegram/build/apo_ledger_smoke.ps1` compiled and executed native `apo_behavior_ledger.cpp` against Qt5Cored with MSVC 19.44. Four independent process checks PASS: write three events, restart/replay/append fourth, restart/verify four, reject SHA-tampered file without switching to a default ledger. The first corrupt-file run exposed an implicit-path fallback defect, subsequently repaired and reverified. This is a Ledger module test, **not** evidence of network dispatch, binary launch, full crash recovery or E2E.
+
+**Earlier checkpoint limitations (superseded in part below):** native binary, launch and UI evidence were absent at the time. Action ID / MTProto response correlation, recovery, autonomous outcomes, and measurable value still require genuine execution evidence.
+
+### Native product build and interactive UI acceptance — 2026-10-19
+
+Upstream verified directly via Firecrawl at `telegramdesktop/tdesktop` (`README.md`, `docs/building-win.md`, `Telegram/CMakeLists.txt`, `test/README.md`, `intro/intro_start.cpp`, `intro/intro_widget.cpp`, `mtproto/sender.h`, `api/api_sending.cpp`). Official Windows build is Visual Studio 2026 + MSVC 14.44 + Windows SDK 10.0.26100.0; the native executable is `Telegram.exe`. Do not replace the client's own native session, history, MTProto, UI, login, or test harness with a wrapper.
+
+**Observed on the Titan Windows host, with source HEAD `09ac7cf7cf`:**
+- Incremental Windows x64 Debug build completed **exit 0** and linked `tdesktop/out/Debug/Telegram.exe`; ordinary product was launched in an isolated `-workdir` and generated a real visible Telegram window and its own `tdata`. It also closed normally; the pre-existing Telegram process was not terminated.
+- Reusable native product regression source: `Telegram/build/apo_native_ui_smoke_scenario.cpp`. Uses the upstream Debug-only `Test::Runner`, `Test::CaptureWidget` / widget raster inspection, `Test::Click`, `Intro::Widget`, and `Intro::details::QrWidget`. It does not log in, expose secrets, or send a user message.
+- Reproducible command: `powershell -NoProfile -ExecutionPolicy Bypass -File Telegram/build/apo_native_ui_smoke.ps1`. The script overlays upstream's no-op `test/test_scenario.cpp` temporarily, builds `Telegram.exe`, starts it with `-testagent -workdir <disposable>`, requires real `SCENARIO_RESULT: PASS (failures: 0)` plus `TEST_COMPLETE`, restores the original source byte-for-byte and rebuilds the normal product. This is a native product acceptance test, not a standalone fake UI test.
+- **Reproduced script run: PASS, exit 0**. Evidence at `tdesktop/out/apo_native_ui_smoke_fixture/test_evidence/test_log.txt`: six stages, full-size nonblank Telegram welcome window, APΩ Runtime running inside the process, zero/unknown account projections before login, actual **Start Messaging** click, and transition to actual **QR login step** with no fabricated authorization.
+- The product test binary SHA-256 was `339269298BF7ADC8146287C2E013DDDB4A2878C53C51DD138E60E7C3AF6978C5`. After restoring the no-op test entrypoint and rebuilding, the ordinary native binary SHA-256 is `F67337601786E6F958BBBC6DAC3BC5828DAE480D285E29A7067C0C6791A02500`. Product UI test and restore build both finished with exit 0. Log paths: `out/apo_native_ui_smoke_overlay_build.log` and `out/apo_native_ui_smoke_restored_build.log`.
+- **Certified only:** source-in-build, native binary link, startup, initial UI rasterization and one real product navigation action without login. **Not yet certified:** authorized real Telegram session, account chat history/send/receive, APΩ dispatch with action-id↔request-id, MTProto server ACK, observed update, full action crash recovery, native Telegram Economy value.
+
+**Continue at the first unverified product dependency:** test real Telegram authorization and session projection in a separate authorized fixture, then connect the APΩ executor to the existing native Telegram sending APIs without inventing transport or marking SENT/ACK/OBSERVED optimistically. Preserve the user's existing sessions and do not label the untested E2E chain PASS.
+
+### Ω-Telegram branding and authenticated-profile restart — 2026-10-19
+
+**Product invariant unchanged:** Telegram Desktop itself is the client and APΩ is embedded native code. Branding does not introduce another transport, bot, application wrapper or LLM dependency.
+
+**Source changes:**
+- Core app name is `Omega Telegram Desktop`; runtime Qt application identity is `OmegaTelegramDesktop`. Main native window titles visibly include `Ω-Telegram` even when a chat is active. The About dialog discloses that this is a Telegram Desktop fork.
+- Windows executable version resources identify the independent Omega fork. Windows resource icon is `Telegram/Resources/art/omega_icon256.ico`, generated reproducibly by `Telegram/build/apo_brand_icon.ps1` from the untouched upstream paper-plane icon plus a purple Ω badge. The Qt runtime icon includes the corresponding badge.
+- Installer metadata in `Telegram/build/setup.iss` uses a different name, shortcut identity and GUID, matching `core/version.h`. **The installer has not been packaged or installed/tested yet.** The real Debug binary remains `out/Debug/Telegram.exe` to preserve upstream assumptions about the executable filename.
+- Windows desktop shortcut `C:\Users\pc\Desktop\Ω-Telegram.lnk` targets the native binary with `-workdir` directed to `out/omega-native-authorized`. The official Telegram UWP installation/shortcut is unaffected.
+
+**Native product results:**
+- MSVC x64 Debug build finished exit 0; executable resources read back as `Omega Telegram Desktop - Native AP Omega Fork`, independent publisher and product name.
+- Reusable native `apo_native_ui_smoke.ps1` was rerun with two additional assertions for application name and native window title. The actual `Telegram.exe` Debug harness recorded `SCENARIO_RESULT: PASS (failures: 0)` and `TEST_COMPLETE`, including the new branding checks and native Start Messaging → QR login flow. Its cleanup restored the upstream no-op test entrypoint byte-for-byte and relinked the normal product, both builds exit 0.
+- Normal restored branded Debug executable SHA-256: `F62EAA6732273A9A54E99D8299945E18F1A85B35F767BBF10985FCF30BA6E4A3`.
+- Creator authenticated the separate profile. The branded binary was restarted using the same profile and displayed the post-login Telegram interface with a title ending `• Ω-Telegram`. The original Telegram UWP process remained running. Authentication success beyond this observed native session is not a substitute for actual request/ACK tests.
+- Native APΩ behavior Ledger in the branded application's AppData directory was active, with a read-only sample of 1,093 records, contiguous sequence and previous-hash pointers. Its `EXECUTION` and `OBSERVED_RESULT` event labels **do not prove** server execution or E2E.
+- Python reference tests: 45/45 PASS. Source syntax tests and reference tests remain lower-level evidence than product-runtime tests.
+
+**Outstanding engineering conditions:** real APΩ native action dispatch, correlated MTProto ACK, observed post-action Telegram state, durable per-action recovery, and measured autonomous user value. Current default Ledger location follows `QStandardPaths::AppDataLocation` (application-name scope), not the explicit `-workdir` profile; multiple isolated profile instances may therefore share an APΩ ledger. Verify and resolve this boundary before accepting multi-profile or full crash-recovery claims. Keep sensitive Telegram credentials and raw chat data out of build logs, Git and artifacts.
+
+### Native APΩ StateBridge, Ω(P) and unread-priority product verification — 2026-10-19
+
+**Scope:** existing Telegram Desktop C++/Qt/MTProto client; no external agent or transport. Retain full Telegram capabilities and Creator authority.
+
+**Implemented in source (subject to ongoing feature expansion):**
+- `apo_runtime.cpp`: profile-local Ledger at `cWorkingDir()/apo/raw_behavior.jsonl`; old shared AppData Ledger remains untouched, not merged into possibly unrelated profile histories.
+- `apo_state_bridge.cpp`: persist unread reduction only on true change and reject negative counts; no repetitive identical unread events.
+- `apo_verifier.cpp/h`: the sealed Ω(P) formula/thresholds are unchanged; both baseline and candidate must be finite and within `[0,1]^4`. Native fixture tests accept `S1=(0,0.05,1,0.99)` and reject NaN/Infinity/out-of-domain.
+- `apo_cognitive_loop.cpp/h`: read the **existing native** `Data::Session.chatsList()->indexed()->all()`, not a fictitious recipient or the full-account badge as a target. Observe at most 512 loaded chat rows, distinguish unknown unread state, rank known chats by mentions → unmuted unread → total unread → list recency, emit up to five anonymized priorities. Retain loaded-row and coverage metadata. Suppress identical ranking observations. Do not submit the previous empty `compute.draft_reply` intent every 10 seconds.
+- `apo_behavior_audit.ps1`: inspect structural telemetry only, per profile, including ledger continuity, Telegram base MTProto request/response and native unread ranking. Telegram network RPC callbacks are **not** APΩ action ACK.
+
+**Native build and tested runtime evidence:**
+- Actual MSVC x64 Debug `Telegram.exe` linked successfully with exit 0 after one compile fix for upstream `Dialogs::List` (const iterable, no `operator[]`). A separate LNK1104 attempt was caused by a second Omega native profile keeping the target binary mapped; it was shut down using Telegram's official `-quit`, without deleting either `tdata` or stopping official Telegram UWP.
+- Product profile was restarted and native `apo.cognitive.unread_ranking` event observed: 247 total loaded chat rows, 247 inspected, 246 known unread states, 80 ranked unread chats, fully covered **loaded list only**. Top five *anonymized* unread message counts: 1397, 868, 454, 384, 369. This does not claim to have crawled all Telegram history or identified business opportunities.
+- Source-linked product binary after ranking build SHA-256: `6915C8CE914960FD22B0A8ADD94B4BA768553AC55F8F10C722846EC564E3E131`.
+- Native regression rerun with upstream Telegram `Test::Runner`: `SCENARIO_RESULT: PASS (failures: 0)`, `TEST_COMPLETE`. This includes application branding, ledger profile isolation, Ω(P) math/domain validation, deduplicated unread reduction, honest blocked native dispatch, and anonymous cognitive cycle with zero invented actions. Overlay test binary SHA-256 `E1A3C9967B2A691A34FF2871D17CABCB458F5354D94867DB92ED240DE2250D6A`. Upstream `test_scenario.cpp` was restored byte-for-byte and **normal branded binary relinked** successfully, SHA-256 `BF168ADE0DBA7170839160315B3F8C2F25B75E7F3C8FD49B504902EBECB63055`.
+- Structural ledger integrity has previously shown no parse errors, sequence discontinuities or broken previous-hash pointers. Old `compute.draft_reply` candidates were rejected at the sealed Ω(P) gate (the saturated total unread was never a specific reply target). Inspect new process events for zero invented submissions.
+- Reference tests/CI are a separate lower-level gate; no assertion of full Telegram functional regression or APΩ native side-effect E2E is made.
+
+**Still open:** a truly authorized bounded native operation with `action_id → native request_id → server response → postcondition`; persisted pending/recovery state and unknown-outcome reconciliation; side-effect deduplication; Creator goal/authority UI; full Telegram upstream regression. Do not label a native read or network request as success solely because of a completion callback. Core Ω(P) formulas and Economy's six sealed equations must not be altered to get PASS.
+
+### Authenticated native read-only action and behavioral output — 2026-10-19, 12:11 ICT
+
+**Unchanged mission:** complete Telegram Desktop client + native APΩ mathematical/cognitive execution; Telegram upstream functionality remains the sensory and action surface. Keep the Creator's authenticated profile running without any unsanctioned user-visible send, delete, join, or payment.
+
+**Source linkage:** existing `apo_cognitive_loop.cpp` plans at most one `dialogs.inspect_server` operation per account per process after a fully loaded and known local dialog-list observation. The `C` cost is an explicitly marked bounded-query-budget **estimate**, `E` measures known-row coverage, `R` and `B` are **sealed baseline priors**, not measured risk/authority. `apo_authority.cpp` whitelists this read-only action. `apo_executor.cpp` uses native `session->api().request(MTPmessages_GetDialogs(...))`, records the action/request IDs, persists dispatch and response, and requires a server dialog/local list match before `STATE_CONFIRMED` and `CLOSED`. All other unwired action types remain blocked; no fake success.
+
+**Independent evidence from running authenticated profile:**
+- Process `Telegram.exe` PID `327400` with native window title ending `Ω-Telegram`, distinct from official Telegram UWP. Running source-linked Debug executable had SHA-256 `BB0737B62F1FFA9434AE874BA43BC1F91D10E07F2ABCD09CFAFF167730A4DC47`.
+- Profile path `out/omega-native-authorized`; confidential `tdata` remains intact. APΩ profile-local Ledger file is `out/omega-native-authorized/apo/raw_behavior.jsonl`; inspect via `Telegram/build/apo_behavior_audit.ps1`, which prints structural aggregates only.
+- At 12:11 ICT: **12,820 Ledger rows, parse/sequence/prev-hash errors 0**. `apo.cognitive.unread_ranking` recorded actual native chat-list observation (247 inspected, 246 known, 80 unread-ranked, loaded-list coverage true), and current runtime unread consecutive duplicates 0.
+- **Two bounded native read-only operations** in the profile Ledger yielded `SERVER_RESPONSE_RECEIVED=2`, `NATIVE_READ_POSTCONDITION_MATCHED=2`, `SUCCESS_READ_ONLY=2`. Native APΩ action phases include server responses and closure, unlike unrelated baseline Telegram RPC telemetry. This only verifies a **read** operation; it does not prove a side-effect, customer success, recovery after restart, or whole-product completion.
+- Previous candidate submissions `REJECTED_BY_APO_VERIFIER=280` remain in the **historical Ledger** and must not be mislabeled as current-process regressions. Current-process rankings emit measured observations rather than speculative `compute.draft_reply` to `unread_inbox`.
+- Native regression `apo_native_ui_smoke.ps1` at 11:55: `SCENARIO_RESULT: PASS (failures: 0)`, `TEST_COMPLETE`, including anonymous cognitive non-dispatch and explicit unauthenticated native inspection refusal. Runner restored original upstream `test_scenario.cpp`, relinked normal executable and did not touch the Creator's signed-in `tdata`.
+
+**Remaining product gates:** demonstrate an authorized **state-changing** Telegram action by connecting the native send/edit/etc. subsystem with stable idempotency/random ID, per-action server acknowledgment and actual Telegram update, durable unknown-outcome reconciliation and crash restart without duplicate side effects, then long-horizon Creator goals and measurable Telegram Economy outcomes. Do not use the sealed Ω(P) or economy equations as a substitute for measuring real input and postcondition states. Never close the Creator's existing account process merely to run a test.
+
+### Native write correlation gate — 2026-10-26 (Titan)
+
+- Corrected `apo_behavior_ledger.cpp` so a send ACK, observed-state confirmation, or CLOSED record without the persisted `random_id_hex` cannot advance/close a native write. A mismatched random ID likewise remains unresolved; valid subsequent correlated evidence may reconcile without resending.
+- Updated `apo_executor.cpp` direct-send CLOSED event to include `random_id_hex`; readback CLOSED already contained it. Updated `apo_ledger_smoke.cpp` with a missing-correlation ACK rejection and corrected replay fixtures.
+- `apo_ledger_smoke.ps1`: PASS (exit 0), including `send-ack-without-dispatched-write`, reopen, unknown outcome and reconciliation. Native MSVC `Telegram.vcxproj /t:ClCompile`: exit 0 for `apo_behavior_ledger.cpp` and `apo_executor.cpp`. `git diff --check`: no whitespace errors (only CRLF conversion warnings).
+- Native full build with distinct staging OutDir initiated only after checking no build processes. It may recompile dependencies; do not start a duplicate. Preserve active Telegram processes and all uncommitted changes.
+- Product remains NOT ACCEPTED: production write-domain state and producer, actual MTProto send ACK, observed native state, and real-action crash/replay still lack end-to-end evidence. No commit/push.
+
+### Correlation-stage native binary and isolated restart evidence — 2026-10-26 (Titan)
+
+- Full staged native binary exists at `out/apo_native_stage_20261026_correlation/Telegram.exe` (539,793,408 bytes; SHA-256 `DBA061FE4BAE245BD6775A32768BEAAFD6510396E1C12318FBCE8E0C2EDE4950`), timestamp 00:07:37 local, after the two correlation source changes at 00:00-00:01.
+- The staged binary launched using only `out/omega-stage-correlation-smoke`, PID 76900, and remained responsive; after forced stop it restarted using the same isolated profile, PID 12168, responsive. The profile-local ledger advanced from sequence 28 to 49. Structural audit: 49 events, zero parse/sequence/previous-hash/SHA-256 errors, all hash v2; existing Telegram PIDs 45880 and 79692 preserved.
+- `apo_ledger_smoke.ps1` compiled and ran successfully (exit 0), including write ACK correlation, unknown-outcome recovery, reopen, and read-only evidence cannot authorize a write. No duplicate full build, no commit/push.
+- GitHub Actions native x64 Debug runs 39176873968 and 39517111373 are SUCCESS; the latter is the latest native build returned by `gh run list` as of 00:29 local. These CI results are on remote commits, not the dirty local working tree.
+- Isolated profile is unauthenticated: `ackPhases=0`, `observedPhases=0`. This is native binary and ledger restart evidence only, NOT a real send/recovery product acceptance gate. Alpha Studio MCP `chat_status` available but `chat` returns HTTP 503; Chat Desktop MCP `list_sessions` succeeds (no active sessions).
+
+### Native write postcondition replay guard — 2026-10-26 (Titan)
+
+- `apo_behavior_ledger.cpp`: a write `STATE_CONFIRMED` result label no longer establishes a verified postcondition by itself. Recovery indexing requires a positive `server_message_id` and `native_projection_present=true` alongside the existing correlated `random_id_hex` and exact native success result before a later `CLOSED` may clear the unresolved write. No Ω(P) formulas, native dispatch, or authority policy changed.
+- `apo_ledger_smoke.cpp`: extended ACK-without-DISPATCHED fixture to reject a premature `CLOSED` following an unprojected success label, then accept a genuinely structured postcondition; verified reopen/replay. Updated the existing observed-send reconciliation fixture to include the projection fields emitted by the native executor.
+- Native MSVC/Qt ledger smoke: PASS, exit 0 (including negative guard and reopen). `git diff --check`: no whitespace errors; Git reports only existing LF/CRLF conversion warnings. This is a module-level regression, NOT proof of a real Telegram send, ACK, projection, or crash/replay of a side effect. No full product build started in this checkpoint.
+- GitHub Actions native Debug runs 39176873968 and 39517111373: SUCCESS on remote SHAs; neither certifies the uncommitted local fix. Local HEAD `d66089374a8022ad54116b6cd09312837b1a06ae`, 26 dirty tracked files retained. No commit/push, no changes to live Telegram sessions or secrets.
+- Remaining gates: verified production `messages.send_text` producer and write-domain measured state, authenticated native execution with correlated server ACK, observed outgoing native state, durable replay/recovery of that same action, and upstream regression.
+
+### Native write ACK request identity guard — 2026-10-26 (Titan)
+
+- Direct source audit identified that `apo_behavior_ledger.cpp` accepted `ACKNOWLEDGED` with the matching persisted `random_id_hex` but no positive MTProto `request_id`. Added a fail-closed `ACK_REQUEST_ID_MISSING` recovery phase; a subsequent correctly correlated ACK may reconcile without retransmitting. No changes to Ω(P), Creator authority, or native send transport.
+- Extended the existing `send-ack-without-dispatched-write` smoke fixture to reject the missing-request ACK and verify subsequent valid ACK + native postcondition + reopen. Native MSVC/Qt `apo_ledger_smoke.ps1`: PASS, exit 0; `git diff --check`: exit 0 (existing line-ending warnings only).
+- Dedicated native build launched after confirming no MSBuild/CMake/Ninja/linker was active, using the existing `out/Telegram/Telegram.vcxproj` and isolated output `out/apo_native_stage_20261026_ackrequest`. Do not start a second build while it is active. Full binary, launch, and product E2E are NOT yet certified by this module-level test. Preserve two running Telegram processes, profile data, and all local changes; no commit/push.
+- CI REST audit: latest GitHub Actions batch dated 2026-10-20 UTC, native Debug run 39517111373 SUCCESS; no newer native build returned as of 2026-10-26 local. Local dirty source is not covered by that CI. Alpha Studio existing process retained; attempted separate MCP client was blocked by the active run-store writer lock and was not used for source mutation.
+
+### Native write request-chain integrity — 2026-10-26 (Titan)
+
+- Source audit found that the recovery index could accept `STATE_CONFIRMED` and `CLOSED` without an MTProto `request_id`, or with a request ID different from the previously acknowledged request, even when `random_id_hex` matched. This could falsely reconcile a write using evidence from another RPC.
+- Surgical fix in existing `apo_behavior_ledger.cpp`: all positive transitions now require a positive request ID, and every observed request ID must equal the first persisted ID for that action. Reject with `POSTCONDITION_REQUEST_ID_MISSING` or `REQUEST_ID_MISMATCH` without erasing the unresolved write. Preserve subsequent valid reconciliation; no changes to Omega(P), authority, producer, or native transport.
+- Extended existing `apo_ledger_smoke.cpp` to test missing request ID, mismatched state confirmation, mismatched closure, then valid same-request ACK/postcondition/closure and replay. MSVC/Qt native `apo_ledger_smoke.ps1`: PASS (exit 0), including `send-ack-without-dispatched-write`, reopen and all other existing modes.
+- GitHub native CI 39176873968 and 39517111373: SUCCESS on historical remote commits; no newer native build in `gh run list` as of this audit. Current local change is not CI-certified. Full native build started only once after checking no compiler/linker active, output `out/apo_native_stage_20261026_requestchain`; binary/launch NOT yet certified. Preserve live Telegram PIDs 45880/79692 and all dirty tracked files; no commit/push. Product NOT ACCEPTED until an authorized real native write has correlated ACK, observed state and crash/replay evidence.
+
+### Request-chain stage binary and isolated restart — 2026-10-26 07:49 ICT (Titan)
+
+- Existing single native stage build completed: `out/apo_native_stage_20261026_requestchain/Telegram.exe`, 539,801,088 bytes, modified 06:47 local; SHA-256 `085AE276C5B1B0BA7A6AB76356E9D131225949B6B85175452673B7583ADD56B3`. No MSBuild/cl/link/ninja/cmake processes observed during the check; no duplicate build launched.
+- Native `apo_ledger_smoke.ps1` rerun after build: exit 0; tests include mismatched/missing request identity, send ACK without dispatch, valid reconciliation and ledger reopen. `git diff --check`: exit 0 (only existing line-ending warnings).
+- Stage binary launched under isolated `out/omega-stage-requestchain-smoke` profile, PID 139632, responsive native window `Telegram • Ω-Telegram`. Forced termination of only that isolated process followed by restart on the same isolated profile, PID 131820, responsive. This tests anonymous process restart, NOT recovery of a real sent action.
+- Read-only `apo_behavior_audit.ps1` on isolated profile at 07:49 local: 57 ledger events, all hash v2, 0 parse/sequence/prev-hash/SHA-256 errors; 13 baseline MTProto requests, 9 correlated baseline responses, 0 APΩ planned/sent/ACK/observed/closed action phases. Baseline MTProto responses are not APΩ action ACK.
+- `gh run list` on 26 October still shows historical native x64 Debug run 39517111373 SUCCESS (2026-10-20 UTC), native review 39517117207 SUCCESS; no newer native build found. CI does not cover uncommitted local changes. HEAD `d66089374a`, ahead 13, 26 dirty tracked files retained. No commit/push.
+- Remaining blocker unchanged: native producer for a specifically authorized `messages.send_text`, measured write-domain state, authenticated real server ACK, observed Telegram state and replay/recovery of the same side effect. Product NOT ACCEPTED.

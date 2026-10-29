@@ -12,6 +12,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_forum.h"
 #include "data/data_message_reactions.h"
 #include "data/data_session.h"
+#include "data/components/credits.h"
+#include "core/credits_amount.h"
 #include "data/data_download_manager.h"
 #include "base/battery_saving.h"
 #include "base/event_filter.h"
@@ -61,6 +63,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
+#include "apo/apo_runtime.h"
+#include "apo/apo_state_bridge.h"
+#include "apo/apo_behavior_ledger.h"
 #include "media/view/media_view_overlay_widget.h"
 #include "media/view/media_view_open_common.h"
 #include "mtproto/mtproto_dc_options.h"
@@ -188,6 +193,9 @@ Application::Application()
 
 	_platformIntegration->init();
 
+	// APΩ Native Agent Runtime: Bootstrapping autonomous core
+	apo::Runtime::Instance().start();
+
 	passcodeLockChanges(
 	) | rpl::on_next([=](bool locked) {
 		_shouldLockAt = 0;
@@ -209,8 +217,95 @@ Application::Application()
 
 	_domain->activeSessionChanges(
 	) | rpl::on_next([=](Main::Session *session) {
-		if (session && !UpdaterDisabled()) { // #TODO multi someSessionValue
-			UpdateChecker().setMtproto(session);
+		// Dispose previous account subscriptions before replacing its projection.
+		_apoCreditsLifetime.reset();
+		if (session) {
+			if (!UpdaterDisabled()) { // #TODO multi someSessionValue
+				UpdateChecker().setMtproto(session);
+			}
+			// Hook session user identity and status into APΩ State Bridge
+			apo::StateBridge::Instance().updateUserProfile(
+				session->userId().bare,
+				QString(),
+				QString(),
+				QString(),
+				QString(),
+				session->premium());
+			// Bootstrap unread state for this account; background accounts
+			// cannot overwrite the active account's APΩ projection.
+			apo::StateBridge::Instance().updateUnreadCount(
+				session->userId().bare,
+				session->data().unreadBadge());
+
+			// Source of truth: the official Telegram Credits service for THIS
+			// active account. In-app TON is not an external wallet balance.
+			_apoCreditsLifetime = std::make_unique<rpl::lifetime>();
+			const auto refreshCredits = [=] {
+				const auto &credits = session->credits();
+				if (credits.loaded()) {
+					const auto value = credits.balance();
+					apo::StateBridge::Instance().updateStarsCredits(
+						session->userId().bare,
+						value.whole(),
+						value.nano());
+				}
+				if (credits.tonLoaded()) {
+					const auto value = credits.tonBalance();
+					apo::StateBridge::Instance().updateTelegramTonCredits(
+						session->userId().bare,
+						value.whole(),
+						value.nano());
+				}
+			};
+			auto &credits = session->credits();
+			credits.loadedValue(
+			) | rpl::on_next([=](bool) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.balanceValue(
+			) | rpl::on_next([=](CreditsAmount) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.tonLoadedValue(
+			) | rpl::on_next([=](bool) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.tonBalanceValue(
+			) | rpl::on_next([=](CreditsAmount) {
+				refreshCredits();
+			}, *_apoCreditsLifetime);
+			credits.load();
+			credits.tonLoad();
+		} else {
+			// Logout/no active account invalidates every projected account field.
+			apo::StateBridge::Instance().updateUserProfile(
+				0, QString(), QString(), QString(), QString(), false);
+		}
+
+		const auto accountsAuthed = _domain->accountsAuthedCount();
+		const auto bridgeSelf = apo::StateBridge::Instance().currentSelf();
+		const auto bridgeHasIdentity = (bridgeSelf.userId != 0);
+		const auto bridgeMatchesNative = session
+			&& (bridgeSelf.userId == session->userId().bare);
+		const auto diagnosticStatus = session
+			? (bridgeMatchesNative
+				? QStringLiteral("ACTIVE_MATCH")
+				: QStringLiteral("ACTIVE_MISMATCH"))
+			: (accountsAuthed > 0
+				? QStringLiteral("NO_ACTIVE_BUT_OTHER_AUTHED")
+				: QStringLiteral("NO_AUTHED_SESSION"));
+		if (!apo::RecordBehavior(
+			apo::EventType::StateReduce,
+			QString(),
+			QStringLiteral("apo.native.identity_transition"),
+			QJsonObject{
+				{ QStringLiteral("active_has_session"), session != nullptr },
+				{ QStringLiteral("accounts_authed"), accountsAuthed },
+				{ QStringLiteral("bridge_has_identity"), bridgeHasIdentity },
+				{ QStringLiteral("bridge_matches_native"), bridgeMatchesNative },
+				{ QStringLiteral("diagnostic_status"), diagnosticStatus },
+			})) {
+			qWarning("APO identity transition event not persisted");
 		}
 	}, _lifetime);
 
@@ -258,6 +353,9 @@ void Application::closeAdditionalWindows() {
 }
 
 Application::~Application() {
+	// APΩ Native Agent Runtime: Flushing and stopping autonomous loop
+	apo::Runtime::Instance().stop();
+
 	if (_savedWindows) {
 		_savedWindows->writeNow();
 	}
