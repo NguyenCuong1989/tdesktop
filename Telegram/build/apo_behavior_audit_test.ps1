@@ -97,6 +97,46 @@ try {
         throw 'Valid audit fixture was not accepted with body and recovery evidence'
     }
 
+    # Segments are one ledger, not independent histories.
+    $segmentedLedger = Join-Path $testRoot 'segmented.jsonl'
+    $segmentOne = $segmentedLedger + '.000001'
+    $segmentTwo = $segmentedLedger + '.000002'
+    [IO.File]::WriteAllText($segmentedLedger, $first.Line + "`n",
+        [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($segmentOne, $second.Line + "`n",
+        [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($segmentTwo, $third.Line + "`n",
+        [Text.UTF8Encoding]::new($false))
+    $segmented = (& $audit -LedgerPath $segmentedLedger -MaxEvents 10) |
+        ConvertFrom-Json
+    if (!$segmented.evaluatedPrefixIntegrityValid -or
+        !$segmented.reachedEndOfLedger -or
+        $segmented.ledgerSegments -ne 3 -or
+        $segmented.eventTotals.eventCount -ne 3 -or
+        $segmented.lastSequence -ne 3) {
+        throw 'Valid segmented audit did not verify the whole linked history'
+    }
+    # A missing middle file is an integrity failure, never a fresh chain.
+    Remove-Item -LiteralPath $segmentOne
+    $missingRejected = $false
+    try {
+        & $audit -LedgerPath $segmentedLedger -MaxEvents 10 | Out-Null
+    } catch {
+        $missingRejected = $_.Exception.Message -like 'Ledger segment gap*'
+    }
+    if (!$missingRejected) { throw 'Audit accepted missing middle segment' }
+    # Modifying the middle segment without recomputing its hash must fail.
+    [IO.File]::WriteAllText($segmentOne,
+        ($second.Line -replace 'RAW.COMPUTATION', 'RAW.DECISION') + "`n",
+        [Text.UTF8Encoding]::new($false))
+    $segmentTampered = (& $audit -LedgerPath $segmentedLedger -MaxEvents 10) |
+        ConvertFrom-Json
+    if ($segmentTampered.evaluatedPrefixIntegrityValid -or
+        $segmentTampered.eventTotals.sha256Errors -lt 1) {
+        throw 'Audit accepted tampered middle segment'
+    }
+    Write-Output '[PASS] segmented audit continuity, missing-middle fail-closed and tamper detection'
+
     $tampered = ($first.Line -replace '"user_dialogs":1', '"user_dialogs":2')
     [IO.File]::WriteAllText($tamperedLedger, $tampered + "`n",
         [Text.UTF8Encoding]::new($false))
@@ -118,6 +158,9 @@ try {
     }
     Write-Output '[PASS] behavior audit verifies mixed hash versions, v2 metadata, body shape and recovery evidence'
 } finally {
+    # This GUID-scoped test root contains only disposable synthetic fixtures.
+    Get-ChildItem -LiteralPath $testRoot -Filter 'segmented.jsonl*' -File `
+        -ErrorAction SilentlyContinue | Remove-Item -Force
     Remove-Item -LiteralPath $validLedger, $tamperedLedger -Force `
         -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $testRoot -Force -ErrorAction SilentlyContinue

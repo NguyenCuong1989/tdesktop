@@ -529,6 +529,9 @@ void CognitiveLoop::stepNow() {
 			recovery[QStringLiteral("account_scope")] = accountScope;
 			recovery[QStringLiteral("request_id")] = pending.requestId;
 			recovery[QStringLiteral("random_id_hex")] = pending.randomIdHex;
+			recovery[QStringLiteral("peer_id")] = pending.peerId;
+			recovery[QStringLiteral("peer_is_channel")] = pending.peerIsChannel;
+			recovery[QStringLiteral("server_message_id")] = pending.serverMessageId;
 			recovery[QStringLiteral("previous_phase")] = pending.phase;
 			recovery[QStringLiteral("server_acknowledged")] =
 				pending.serverAcknowledged;
@@ -545,6 +548,10 @@ void CognitiveLoop::stepNow() {
 		}
 		_lastRecoveryAccountScope = accountScope;
 	}
+	// Retry only read-only reconciliation for durable, server-ACKed writes
+	// whose exact peer and server message ID are already in the ledger.
+	ActionExecutor::Instance().reconcilePendingNativeWrites(accountScope);
+
 	const auto measurementComplete = list->loaded() && limit > 0
 		&& knownRows > 0 && limit == int(rows.size());
 	const auto previous = measurementComplete

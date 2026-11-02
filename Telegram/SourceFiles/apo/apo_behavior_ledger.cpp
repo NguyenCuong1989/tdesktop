@@ -12,16 +12,39 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QTextStream>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace apo {
 
 namespace {
+// Keep the original ledger as segment zero so deployed profiles remain
+// readable. Continuations carry the SAME monotonic sequence/hash chain.
+[[nodiscard]] QString LedgerSegmentPath(const QString &base, int index) {
+	return index == 0 ? base : base + QStringLiteral(".%1")
+		.arg(index, 6, 10, QChar('0'));
+}
+
 [[nodiscard]] bool IsAsyncEvidenceGap(
 		const QString &actor,
 		const QJsonObject &payload) {
 	return actor == QStringLiteral("apo.behavior_ledger")
 		&& payload.value(QStringLiteral("status")).toString()
 			== QStringLiteral("ASYNC_EVIDENCE_GAP");
+}
+
+// QJsonValue stores numeric IDs as doubles. Never coerce a fractional or
+// unrepresentable value into another MTProto request's durable identity.
+[[nodiscard]] std::optional<QString> ExactPositiveRequestId(
+		const QJsonValue &value) {
+	if (!value.isDouble()) return std::nullopt;
+	const auto number = value.toDouble();
+	constexpr auto kMaxExactJsonInteger = 9007199254740991.0;
+	if (!std::isfinite(number) || number <= 0.0
+		|| number > kMaxExactJsonInteger
+		|| std::trunc(number) != number) {
+		return std::nullopt;
+	}
+	return QString::number(static_cast<int64>(number));
 }
 
 } // namespace
@@ -152,15 +175,43 @@ void BehaviorLedger::indexNativeReadUnlocked(
             == QStringLiteral("messages.sendMessage")) {
         const auto scope = payload.value(QStringLiteral("account_scope")).toString();
         const auto randomHex = payload.value(QStringLiteral("random_id_hex")).toString();
+        const auto textHash = payload.value(QStringLiteral("text_sha256")).toString();
+        const auto targetHash = payload.value(QStringLiteral("target_sha256")).toString();
+        const auto peerId = payload.value(QStringLiteral("peer_id")).toString();
+        const auto peerIsChannel =
+            payload.value(QStringLiteral("peer_is_channel")) == QJsonValue(true);
         if (scope.isEmpty() || randomHex.isEmpty()) return;
+        // A repeated action_id cannot silently change the native payload,
+        // recipient, account, or MTProto idempotency key during replay.
+        // Preserve the first intent and retain both events for forensics.
+        auto existing = _nativeWriteRecovery.find(actionId);
+        if (existing != _nativeWriteRecovery.end()) {
+            if (existing->accountScope != scope
+                || existing->randomIdHex != randomHex
+                || existing->textSha256 != textHash
+                || existing->targetSha256 != targetHash
+                || existing->peerId != peerId
+                || existing->peerIsChannel != peerIsChannel) {
+                existing->phase = QStringLiteral("CONFLICTING_DISPATCH_INTENT");
+                existing->timestampMs = timestampMs;
+            }
+            return;
+        }
         _nativeWriteRecovery.insert(actionId, {
-            actionId, scope, QString(), randomHex, phase, timestampMs
+            actionId, scope, QString(), randomHex, phase, timestampMs,
+            false, false, textHash, targetHash, QString(), peerId,
+            peerIsChannel
         });
         return;
     }
     auto write = _nativeWriteRecovery.find(actionId);
     if (write != _nativeWriteRecovery.end()) {
         if (actor != QStringLiteral("apo.executor.native")) return;
+        // Conflicting intents and known pre-dispatch rejections are sticky:
+        // later ACK/readback/CLOSED records cannot resurrect either outcome.
+        if (write->phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            || write->phase == QStringLiteral("SERVER_MESSAGE_ID_MISMATCH")
+            || write->phase == QStringLiteral("REJECTED_BEFORE_DISPATCH")) return;
         const auto observedRandom =
             payload.value(QStringLiteral("random_id_hex")).toString();
         // A write cannot gain ACK, observed-state or CLOSED evidence from
@@ -176,16 +227,59 @@ void BehaviorLedger::indexNativeReadUnlocked(
             write->timestampMs = timestampMs;
             return;
         }
+        if (positiveEvidence
+            && payload.value(QStringLiteral("account_scope")).toString()
+                != write->accountScope) {
+            write->phase = QStringLiteral("ACCOUNT_SCOPE_MISMATCH");
+            write->timestampMs = timestampMs;
+            return;
+        }
+        // The persisted peer identity is part of the write's recovery key.
+        // Legacy intents without it remain unresolved but cannot gain new
+        // positive evidence from a peer that was not durably identified.
+        if (positiveEvidence && !write->peerId.isEmpty()) {
+            const auto observedPeerId =
+                payload.value(QStringLiteral("peer_id")).toString();
+            const auto observedPeerIsChannel =
+                payload.value(QStringLiteral("peer_is_channel")) == QJsonValue(true);
+            if (observedPeerId != write->peerId
+                || observedPeerIsChannel != write->peerIsChannel) {
+                write->phase = observedPeerId.isEmpty()
+                    ? QStringLiteral("PEER_ID_MISSING")
+                    : QStringLiteral("PEER_ID_MISMATCH");
+                write->timestampMs = timestampMs;
+                return;
+            }
+        }
         const auto requestId = payload.value(QStringLiteral("request_id"));
+        const auto requestValue = requestId.toDouble();
+        // A JSON double outside the exact-integer range, or a fractional
+        // value, must not be truncated into another MTProto request identity.
+        constexpr auto kMaxExactJsonInteger = 9007199254740991.0;
         const auto validRequestId = requestId.isDouble()
-            && std::isfinite(requestId.toDouble())
-            && requestId.toDouble() > 0;
+            && std::isfinite(requestValue)
+            && requestValue > 0.0
+            && requestValue <= kMaxExactJsonInteger
+            && std::trunc(requestValue) == requestValue;
         // All positive transitions must refer to the same native request.
         // random_id identifies the message, but not the RPC that observed it.
         if (positiveEvidence && !validRequestId) {
+            const auto missing = requestId.isUndefined() || requestId.isNull();
             write->phase = phase == QStringLiteral("ACKNOWLEDGED")
-                ? QStringLiteral("ACK_REQUEST_ID_MISSING")
-                : QStringLiteral("POSTCONDITION_REQUEST_ID_MISSING");
+                ? (missing ? QStringLiteral("ACK_REQUEST_ID_MISSING")
+                    : QStringLiteral("ACK_REQUEST_ID_INVALID"))
+                : (missing ? QStringLiteral("POSTCONDITION_REQUEST_ID_MISSING")
+                    : QStringLiteral("POSTCONDITION_REQUEST_ID_INVALID"));
+            write->timestampMs = timestampMs;
+            return;
+        }
+        // An ACK for another MTProto method cannot establish send success,
+        // even if a caller supplies the same action_id and random_id.
+        // Reject before adopting its request ID as the write's identity.
+        if (phase == QStringLiteral("ACKNOWLEDGED")
+            && payload.value(QStringLiteral("native_method")).toString()
+                != QStringLiteral("messages.sendMessage")) {
+            write->phase = QStringLiteral("ACK_NATIVE_METHOD_MISMATCH");
             write->timestampMs = timestampMs;
             return;
         }
@@ -201,8 +295,28 @@ void BehaviorLedger::indexNativeReadUnlocked(
             write->requestId = observedRequestId;
         }
         const auto outcome = payload.value(QStringLiteral("result")).toString();
+        const auto parseServerMessageId = [](const QJsonValue &value) {
+            const auto numeric = value.toDouble();
+            if (!value.isDouble() || !std::isfinite(numeric)
+                || numeric <= 0.0 || numeric > 2147483647.0
+                || std::trunc(numeric) != numeric) {
+                return QString();
+            }
+            return QString::number(static_cast<int64>(numeric));
+        };
         if (phase == QStringLiteral("ACKNOWLEDGED")
             && outcome == QStringLiteral("SERVER_RESPONSE_RECEIVED")) {
+            const auto ackMessageId = parseServerMessageId(
+                payload.value(QStringLiteral("server_message_id")));
+            if (!ackMessageId.isEmpty()) {
+                if (!write->serverMessageId.isEmpty()
+                    && write->serverMessageId != ackMessageId) {
+                    write->phase = QStringLiteral("SERVER_MESSAGE_ID_MISMATCH");
+                    write->timestampMs = timestampMs;
+                    return;
+                }
+                write->serverMessageId = ackMessageId;
+            }
             write->serverAcknowledged = true;
         }
         // A success label alone is not native-state evidence. Require the
@@ -210,15 +324,124 @@ void BehaviorLedger::indexNativeReadUnlocked(
         // real send/readback path before permitting CLOSED on replay.
         if (phase == QStringLiteral("STATE_CONFIRMED")
             && outcome == QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED")) {
-            const auto messageId = payload.value(QStringLiteral("server_message_id"));
-            if (messageId.isDouble() && messageId.toDouble() > 0
+            if (payload.value(QStringLiteral("native_method")).toString()
+                != QStringLiteral("messages.sendMessage")) {
+                write->phase = QStringLiteral("POSTCONDITION_METHOD_MISMATCH");
+                write->timestampMs = timestampMs;
+                return;
+            }
+            const auto evidenceSource =
+                payload.value(QStringLiteral("evidence_source")).toString();
+            if (!write->peerId.isEmpty()) {
+                if (evidenceSource != QStringLiteral("NATIVE_SEND_CALLBACK")
+                    && evidenceSource != QStringLiteral("NATIVE_RECOVERY_READBACK")) {
+                    write->phase = QStringLiteral("POSTCONDITION_SOURCE_MISSING_OR_INVALID");
+                    write->timestampMs = timestampMs;
+                    return;
+                }
+                if (evidenceSource == QStringLiteral("NATIVE_RECOVERY_READBACK")) {
+                    const auto recoveryMethod =
+                        payload.value(QStringLiteral("recovery_rpc_method")).toString();
+                    const auto expectedRecoveryMethod = write->peerIsChannel
+                        ? QStringLiteral("channels.getMessages")
+                        : QStringLiteral("messages.getMessages");
+                    const auto recoveryRequestId =
+                        payload.value(QStringLiteral("recovery_request_id"));
+                    const auto recoveryRequestValue = recoveryRequestId.toDouble();
+                    const auto validRecoveryRequestId = recoveryRequestId.isDouble()
+                        && std::isfinite(recoveryRequestValue)
+                        && recoveryRequestValue > 0.0
+                        && recoveryRequestValue <= 9007199254740991.0
+                        && std::trunc(recoveryRequestValue) == recoveryRequestValue;
+                    if (recoveryMethod != expectedRecoveryMethod
+                        || !validRecoveryRequestId) {
+                        write->phase = QStringLiteral("RECOVERY_RPC_IDENTITY_INVALID");
+                        write->timestampMs = timestampMs;
+                        return;
+                    }
+                    if (payload.value(QStringLiteral("recovery_response_contains_message"))
+                            != QJsonValue(true)) {
+                        write->phase = QStringLiteral("RECOVERY_RESPONSE_MESSAGE_MISSING");
+                        write->timestampMs = timestampMs;
+                        return;
+                    }
+                    write->recoveryRequestId = QString::number(
+                        static_cast<int64>(recoveryRequestValue));
+                    write->recoveryRpcMethod = recoveryMethod;
+                    write->recoveryResponseContainsMessage = true;
+                }
+            }
+            const auto observedTextHash =
+                payload.value(QStringLiteral("text_sha256")).toString();
+            const auto observedTargetHash =
+                payload.value(QStringLiteral("target_sha256")).toString();
+            if (write->textSha256.isEmpty() || write->targetSha256.isEmpty()
+                || observedTextHash != write->textSha256
+                || observedTargetHash != write->targetSha256) {
+                write->phase = QStringLiteral("POSTCONDITION_IDENTITY_MISMATCH");
+                write->timestampMs = timestampMs;
+                return;
+            }
+            const auto observedMessageId = parseServerMessageId(
+                payload.value(QStringLiteral("server_message_id")));
+            if (!observedMessageId.isEmpty()
                 && payload.value(QStringLiteral("native_projection_present"))
                     == QJsonValue(true)) {
+                if (!write->serverMessageId.isEmpty()
+                    && write->serverMessageId != observedMessageId) {
+                    write->phase = QStringLiteral("SERVER_MESSAGE_ID_MISMATCH");
+                    write->timestampMs = timestampMs;
+                    return;
+                }
+                write->serverMessageId = observedMessageId;
                 write->postconditionVerified = true;
             }
         }
         if (phase == QStringLiteral("CLOSED")) {
+            const auto closedMessageId = parseServerMessageId(
+                payload.value(QStringLiteral("server_message_id")));
+            const auto closedEvidenceSource =
+                payload.value(QStringLiteral("evidence_source")).toString();
+            const auto closedRecoveryRequest = ExactPositiveRequestId(
+                payload.value(QStringLiteral("recovery_request_id")));
+            const auto closedRecoveryIdentityMatches =
+                closedEvidenceSource != QStringLiteral("NATIVE_RECOVERY_READBACK")
+                || (write->recoveryResponseContainsMessage
+                    && payload.value(QStringLiteral("recovery_response_contains_message"))
+                        == QJsonValue(true)
+                    && closedRecoveryRequest
+                    && *closedRecoveryRequest == write->recoveryRequestId
+                    && payload.value(QStringLiteral("recovery_rpc_method")).toString()
+                        == write->recoveryRpcMethod);
+            const auto closedIdentityMatches =
+                payload.value(QStringLiteral("native_method")).toString()
+                    == QStringLiteral("messages.sendMessage")
+                && payload.value(QStringLiteral("text_sha256")).toString()
+                    == write->textSha256
+                && payload.value(QStringLiteral("target_sha256")).toString()
+                    == write->targetSha256
+                && !closedMessageId.isEmpty()
+                && closedMessageId == write->serverMessageId
+                && closedRecoveryIdentityMatches
+                && (write->peerId.isEmpty()
+                    || (payload.value(QStringLiteral("peer_id")).toString()
+                            == write->peerId
+                        && (payload.value(QStringLiteral("peer_is_channel"))
+                            == QJsonValue(write->peerIsChannel))))
+                && (write->peerId.isEmpty()
+                    || payload.value(QStringLiteral("evidence_source")).toString()
+                        == QStringLiteral("NATIVE_SEND_CALLBACK")
+                    || payload.value(QStringLiteral("evidence_source")).toString()
+                        == QStringLiteral("NATIVE_RECOVERY_READBACK")
+                    || payload.value(QStringLiteral("evidence_source")).toString()
+                        == QStringLiteral("NATIVE_RECOVERY_LEDGER_REPLAY"));
+            if (!closedIdentityMatches) {
+                write->phase = QStringLiteral("CLOSED_IDENTITY_MISMATCH");
+                write->timestampMs = timestampMs;
+                return;
+            }
             if (write->serverAcknowledged && write->postconditionVerified
+                && !write->serverMessageId.isEmpty()
                 && outcome == QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED")) {
                 _nativeWriteRecovery.erase(write);
             } else {
@@ -241,25 +464,45 @@ void BehaviorLedger::indexNativeReadUnlocked(
             == QStringLiteral("dialogs.inspect_server")) {
         const auto scope = payload.value(QStringLiteral("account_scope")).toString();
         if (scope.isEmpty()) return;
+        const auto sourceTrace =
+            payload.value(QStringLiteral("source_trace_id")).toString();
+        // A duplicate action_id cannot replace the original read's account,
+        // source observation or MTProto request identity during replay.
+        auto existing = _nativeReadRecovery.find(actionId);
+        if (existing != _nativeReadRecovery.end()) {
+            if (existing->accountScope != scope
+                || existing->sourceTraceId != sourceTrace) {
+                existing->phase = QStringLiteral("CONFLICTING_READ_INTENT");
+                existing->timestampMs = timestampMs;
+            }
+            return;
+        }
         _nativeReadRecovery.insert(actionId, {
-            actionId, scope,
-            payload.value(QStringLiteral("source_trace_id")).toString(),
-            QString(), phase, timestampMs
+            actionId, scope, sourceTrace, QString(), phase, timestampMs
         });
         return;
     }
     auto it = _nativeReadRecovery.find(actionId);
     if (it == _nativeReadRecovery.end()) return;
-    // A terminal success without a preceding observed native postcondition
-    // is not evidence and must remain unresolved across restarts.
+    // Once two plans disagree, late ACK/postcondition/CLOSED events for the
+    // first request cannot account for the conflicting second intent.
+    if (it->phase == QStringLiteral("CONFLICTING_READ_INTENT")) return;
+    // Native read success must refer to the exact persisted MTProto RPC.
+    // A matching result label from another request cannot verify or close it.
+    const auto correlatedRequest = ExactPositiveRequestId(
+        payload.value(QStringLiteral("request_id")));
+    const auto sameRequest = correlatedRequest && !it->requestId.isEmpty()
+        && *correlatedRequest == it->requestId;
     if (phase == QStringLiteral("STATE_CONFIRMED")
         && actor == QStringLiteral("apo.executor.native")
+        && sameRequest
         && payload.value(QStringLiteral("result")).toString()
             == QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED")) {
         it->postconditionVerified = true;
     }
     if (phase == QStringLiteral("CLOSED")) {
         if (actor == QStringLiteral("apo.executor.native")
+            && sameRequest && it->serverAcknowledged
             && it->postconditionVerified
             && payload.value(QStringLiteral("result")).toString()
                 == QStringLiteral("SUCCESS_READ_ONLY")) {
@@ -281,11 +524,16 @@ void BehaviorLedger::indexNativeReadUnlocked(
         && (it->phase == QStringLiteral("DISPATCHED")
             || it->phase == QStringLiteral("ACKNOWLEDGED")
             || it->phase == QStringLiteral("RECONCILING")
+            || it->phase == QStringLiteral("REQUEST_ID_INVALID")
+            || it->phase == QStringLiteral("REQUEST_ID_MISMATCH")
             || it->phase == QStringLiteral("UNKNOWN_OUTCOME"))) {
         const auto req = payload.value(QStringLiteral("request_id"));
-        if (req.isDouble() && req.toDouble() > 0) {
-            it->requestId = QString::number(static_cast<int64>(req.toDouble()));
+        const auto request = ExactPositiveRequestId(req);
+        if (request && (it->requestId.isEmpty() || it->requestId == *request)) {
+            it->requestId = *request;
         }
+        // A malformed or conflicting RPC ID is not evidence of a new
+        // request. Preserve the original identity and uncertain outcome.
         it->phase = QStringLiteral("UNKNOWN_OUTCOME");
         it->timestampMs = timestampMs;
         return;
@@ -299,8 +547,27 @@ void BehaviorLedger::indexNativeReadUnlocked(
     }
     if (phase.isEmpty()) return;
     const auto req = payload.value(QStringLiteral("request_id"));
-    if (req.isDouble() && req.toDouble() > 0) {
-        it->requestId = QString::number(static_cast<int64>(req.toDouble()));
+    if (!req.isUndefined() && !req.isNull()) {
+        const auto request = ExactPositiveRequestId(req);
+        if (!request || (!it->requestId.isEmpty()
+                && it->requestId != *request)) {
+            it->phase = request
+                ? QStringLiteral("REQUEST_ID_MISMATCH")
+                : QStringLiteral("REQUEST_ID_INVALID");
+            it->timestampMs = timestampMs;
+            return;
+        }
+        it->requestId = *request;
+        // Only a persisted response from the actual native read RPC can
+        // satisfy the server-ACK gate. A postcondition label is not an ACK.
+        if (actor == QStringLiteral("apo.executor.native")
+            && phase == QStringLiteral("ACKNOWLEDGED")
+            && payload.value(QStringLiteral("native_method")).toString()
+                == QStringLiteral("messages.getDialogs")
+            && payload.value(QStringLiteral("result")).toString()
+                == QStringLiteral("SERVER_RESPONSE_RECEIVED")) {
+            it->serverAcknowledged = true;
+        }
     }
     it->phase = phase;
     it->timestampMs = timestampMs;
@@ -414,11 +681,33 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 	int64 restoredSequence = 0;
 	auto restoredGap = false;
 	auto restoredHash = QStringLiteral("0000000000000000000000000000000000000000000000000000000000000000");
-	if (QFile::exists(_filePath)) {
-		QFile reader(_filePath);
-		if (!reader.open(QIODevice::ReadOnly)) {
+	// Discover only numbered continuation files and require a contiguous
+	// chain. A missing middle segment cannot silently become a new history.
+	const auto info = QFileInfo(_filePath);
+	const auto prefix = info.fileName() + QStringLiteral(".");
+	const auto entries = info.dir().entryList(
+		{ prefix + QStringLiteral("*") }, QDir::Files);
+	int lastSegment = 0;
+	for (const auto &name : entries) {
+		if (!name.startsWith(prefix)) continue;
+		const auto suffix = name.mid(prefix.size());
+		if (suffix.size() != 6 || !std::all_of(
+				suffix.cbegin(), suffix.cend(),
+				[](QChar c) { return c.isDigit(); })) continue;
+		const auto index = suffix.toInt();
+		if (index == 0) return; // A numbered zero aliases the legacy file.
+		lastSegment = std::max(lastSegment, index);
+	}
+	if (lastSegment > 0 && !QFile::exists(_filePath)) return;
+	for (auto segment = 0; segment <= lastSegment; ++segment) {
+		const auto path = LedgerSegmentPath(_filePath, segment);
+		if (!QFile::exists(path)) {
+			if (segment == 0 && lastSegment == 0) break; // New profile.
 			return;
 		}
+		QFile reader(path);
+		if (!reader.open(QIODevice::ReadOnly)
+			|| reader.size() > _limits.maxLedgerBytes) return;
 		while (!reader.atEnd()) {
 			const auto line = reader.readLine(1024 * 1024);
 			if (!line.endsWith('\n')) {
@@ -517,13 +806,14 @@ void BehaviorLedger::initUnlocked(const QString &storagePath) {
 			restoredSequence = sequence;
 		}
 	}
+	_segmentIndex = lastSegment;
 	_sequence = restoredSequence;
 	_lastHash = restoredHash;
 	if (restoredGap) {
 		return;
 	}
 
-	_file = std::make_unique<QFile>(_filePath);
+	_file = std::make_unique<QFile>(LedgerSegmentPath(_filePath, _segmentIndex));
 	if (_file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
 		_initialized = true;
 	}
@@ -614,13 +904,28 @@ bool BehaviorLedger::persistEvent(const PendingEvent &pending) {
 		_initialized = false;
 		return false;
 	}
-	const auto previousSize = _file->size();
+	auto previousSize = _file->size();
 	const auto line = QJsonDocument(event.toJson()).toJson(QJsonDocument::Compact) + '\n';
 	auto storage = QStorageInfo(QFileInfo(_filePath).absolutePath());
 	storage.refresh();
 	const auto availableBytes = (storage.isValid() && storage.isReady())
 		? storage.bytesAvailable()
 		: int64(-1);
+	// Segment limit is NOT a lifetime history limit. Start a new bounded
+	// append-only segment only if disk reserve still permits the full record.
+	// Do not rename, truncate, or reset the legacy history/hash/sequence.
+	if (previousSize > _limits.maxLedgerBytes - line.size()
+		&& LedgerStorageAllowsAppend(0, line.size(), availableBytes, _limits)
+		&& _segmentIndex < 999999) {
+		const auto nextPath = LedgerSegmentPath(_filePath, _segmentIndex + 1);
+		auto next = std::make_unique<QFile>(nextPath);
+		if (next->open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+			_file->close();
+			_file = std::move(next);
+			++_segmentIndex;
+			previousSize = 0;
+		}
+	}
 	if (!LedgerStorageAllowsAppend(
 		previousSize,
 		line.size(),
@@ -782,7 +1087,10 @@ QVector<NativeWriteRecoveryEvidence> BehaviorLedger::unresolvedNativeWrites(
     if (!_initialized || accountScope.isEmpty()) return result;
     for (auto it = _nativeWriteRecovery.cbegin();
             it != _nativeWriteRecovery.cend(); ++it) {
-        if (it.value().accountScope == accountScope) result.push_back(it.value());
+        if (it.value().accountScope == accountScope
+            && it.value().phase != QStringLiteral("REJECTED_BEFORE_DISPATCH")) {
+            result.push_back(it.value());
+        }
     }
     std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
         if (a.timestampMs != b.timestampMs) return a.timestampMs < b.timestampMs;

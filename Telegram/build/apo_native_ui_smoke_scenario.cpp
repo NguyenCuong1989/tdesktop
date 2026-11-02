@@ -342,9 +342,13 @@ void SetupScenario(not_null<Runner*> runner) {
                         && actor == u"apo.test.synthetic_sensory_ingress"_q) {
                     oldSourceSequence = sequence;
                 }
+                // Real MTProto traffic may also have a pending wake when
+                // the fixture switches scope. Count only the wake whose
+                // durable parent is this test's injected old-account event.
                 if (actor == u"apo.cognitive.sensory_wake"_q
                         && payload.value(QStringLiteral("result")).toString()
-                            == u"NOT_REPLAYED_ACCOUNT_SWITCH_NO_ACTION"_q) {
+                            == u"NOT_REPLAYED_ACCOUNT_SWITCH_NO_ACTION"_q
+                        && parent == oldTrace) {
                     ++switchedCount;
                     switchedSequence = sequence;
                     const auto oldScope = QString::fromUtf8(

@@ -22,6 +22,26 @@ if (!(Test-Path -LiteralPath $ledger)) {
 # FileStream resolves relative paths against the host process directory,
 # which can differ from PowerShell's Set-Location in an MCP shell.
 $ledger = (Resolve-Path -LiteralPath $ledger).ProviderPath
+# The native writer extends this ledger in numbered, hash-linked files.
+# Audit all segments in order; silently auditing only the first 512 MiB
+# would report an incorrect state after the first rollover.
+$segmentPrefix = [IO.Path]::GetFileName($ledger) + '.'
+$segmentFiles = @(Get-ChildItem -LiteralPath (Split-Path $ledger -Parent) -File |
+    Where-Object { $_.Name -match ('^' + [Regex]::Escape($segmentPrefix) + '[0-9]{6}$') } |
+    Sort-Object Name)
+$ledgerPaths = [System.Collections.Generic.List[string]]::new()
+$ledgerPaths.Add($ledger)
+$nextSegment = 1
+foreach ($segment in $segmentFiles) {
+    $expectedName = $segmentPrefix + $nextSegment.ToString('D6')
+    if ($segment.Name -cne $expectedName) {
+        throw ('Ledger segment gap/alias detected before ' + $segment.Name)
+    }
+    $ledgerPaths.Add($segment.FullName)
+    $nextSegment++
+}
+$ledgerBytesTotal = [long]0
+foreach ($path in $ledgerPaths) { $ledgerBytesTotal += (Get-Item -LiteralPath $path).Length }
 $reader = $null
 $file = $null
 $types = @{}
@@ -48,6 +68,7 @@ $recoveryPendingEvents = 0
 $totals = [ordered]@{
     eventCount=0
     parseErrors=0
+    invalidRequestIds=0
     sequenceErrors=0
     prevHashLinkErrors=0
     sha256Errors=0
@@ -74,11 +95,12 @@ $lastHash = '0' * 64
 $sha256 = [Security.Cryptography.SHA256]::Create()
 $reachedEndOfLedger = $false
 try {
-    $file = [IO.FileStream]::new(
-        $ledger, [IO.FileMode]::Open, [IO.FileAccess]::Read,
-        [IO.FileShare]::ReadWrite)
-    $reader = [IO.StreamReader]::new($file, [Text.Encoding]::UTF8)
-    while (!$reader.EndOfStream -and $totals.eventCount -lt $MaxEvents) {
+    foreach ($segmentPath in $ledgerPaths) {
+        $file = [IO.FileStream]::new(
+            $segmentPath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite)
+        $reader = [IO.StreamReader]::new($file, [Text.Encoding]::UTF8)
+        while (!$reader.EndOfStream -and $totals.eventCount -lt $MaxEvents) {
         $line = $reader.ReadLine()
         if (!$line) { continue }
         try {
@@ -180,11 +202,29 @@ try {
                     }
                     if ($props.ContainsKey('request_id') -and
                         $null -ne $props['request_id']) {
-                        $reqId = [long]$props['request_id']
-                        if ($null -eq $trace.requestId) {
-                            $trace.requestId = $reqId
-                        } elseif ($trace.requestId -ne $reqId) {
+                        $rawId = $props['request_id']
+                        $numericId = ($rawId -is [int] -or
+                            $rawId -is [long] -or $rawId -is [double])
+                        $valueId = if ($numericId) { [double]$rawId } else { 0.0 }
+                        $validId = $numericId -and
+                            ![double]::IsNaN($valueId) -and
+                            ![double]::IsInfinity($valueId) -and
+                            $valueId -gt 0.0 -and
+                            $valueId -le 9007199254740991.0 -and
+                            [Math]::Truncate($valueId) -eq $valueId
+                        if (!$validId) {
+                            # Bad RPC evidence is not malformed JSON or a
+                            # broken hash chain. Keep integrity and identity
+                            # assessments separate.
+                            $totals.invalidRequestIds++
                             $trace.mismatchedRequestIds++
+                        } else {
+                            $reqId = [long]$valueId
+                            if ($null -eq $trace.requestId) {
+                                $trace.requestId = $reqId
+                            } elseif ($trace.requestId -ne $reqId) {
+                                $trace.mismatchedRequestIds++
+                            }
                         }
                     }
                     if ($props.ContainsKey('server_dialogs')) {
@@ -371,8 +411,15 @@ try {
         } catch {
             $totals.parseErrors++
         }
+        }
+        $reachedEndOfLedger = $reader.EndOfStream -and
+            ($segmentPath -eq $ledgerPaths[$ledgerPaths.Count - 1])
+        $reader.Dispose()
+        $file.Dispose()
+        $reader = $null
+        $file = $null
+        if ($totals.eventCount -ge $MaxEvents) { break }
     }
-    $reachedEndOfLedger = $reader.EndOfStream
 } finally {
     if ($reader) { $reader.Dispose() }
     if ($file) { $file.Dispose() }
@@ -443,7 +490,8 @@ $exe = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'out\Debu
     ledgerPath=$ledger
     evaluatedAt=(Get-Date).ToString('o')
     executablePresent=$(if ($explicitLedger) { $null } else { Test-Path $exe })
-    ledgerBytes=(Get-Item $ledger).Length
+    ledgerBytes=$ledgerBytesTotal
+    ledgerSegments=$ledgerPaths.Count
     eventTotals=$totals
     lastSequence=$lastSequence
     lastHash=$lastHash

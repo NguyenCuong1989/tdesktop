@@ -4757,7 +4757,8 @@ void ApiWrap::sendRichMessage(
 
 void ApiWrap::sendMessage(
 		MessageToSend &&message,
-		std::optional<MsgId> localMessageId) {
+		std::optional<MsgId> localMessageId,
+		std::shared_ptr<TrackedTextSend> tracking) {
 	const auto history = message.action.history;
 	const auto peer = history->peer;
 	const auto &textWithTags = message.textWithTags;
@@ -4779,8 +4780,18 @@ void ApiWrap::sendMessage(
 		: Data::ForumTopic::kGeneralId;
 	const auto topic = peer->forumTopicFor(topicRootId);
 	const auto ephemeral = _session->ephemeralMessages().wouldSend(message);
+	const auto rejectTracked = [&](const QString &reason) {
+		if (tracking && tracking->rejected) {
+			tracking->rejected(tracking->randomId, reason);
+		}
+	};
+	if (tracking && ephemeral) {
+		rejectTracked(QStringLiteral("NATIVE_EPHEMERAL_SEND_UNSUPPORTED"));
+		return;
+	}
 	if (!ephemeral
 		&& !(topic ? Data::CanSendTexts(topic) : Data::CanSendTexts(peer))) {
+		rejectTracked(QStringLiteral("NATIVE_SEND_POLICY_REJECTED"));
 		return;
 	} else if (_session->ephemeralMessages().trySend(message)) {
 		if (clearCloudDraft) {
@@ -4788,7 +4799,9 @@ void ApiWrap::sendMessage(
 		}
 		return;
 	}
-	if (Api::SendDice(message)) {
+	// A tracked ordinary text action is not a dice/interactive send.
+	// Let Telegram's normal message/update pipeline handle its exact text.
+	if (!tracking && Api::SendDice(message)) {
 		return;
 	}
 	local().saveRecentSentHashtags(textWithTags.text);
@@ -4812,7 +4825,29 @@ void ApiWrap::sendMessage(
 
 	const auto exactWebPage = !message.webPage.url.isEmpty();
 	const auto webPageDraft = message.webPage;
+	if (tracking) {
+		auto probeLeft = left;
+		auto probeSending = TextWithEntities();
+		const auto hasSinglePart = TextUtilities::CutPart(
+			probeSending, probeLeft, messageLengthLimit);
+		TextUtilities::Trim(probeLeft);
+		if (exactWebPage || !hasSinglePart || !probeLeft.empty()) {
+			rejectTracked(QStringLiteral("NATIVE_SEND_NOT_SINGLE_TEXT_MESSAGE"));
+			return;
+		}
+	}
+	bool trackedQueued = false;
 	auto isFirst = true;
+	const auto notifyTrackedQueue = [&](int queueId, uint64 randomId) {
+		if (!tracking || !isFirst) return true;
+		if (queueId <= 0) {
+			rejectTracked(QStringLiteral("NATIVE_APIWRAP_QUEUE_REJECTED"));
+			return false;
+		}
+		trackedQueued = true;
+		if (tracking->queued) tracking->queued(randomId, queueId);
+		return true;
+	};
 	while (TextUtilities::CutPart(sending, left, messageLengthLimit)
 		|| (isFirst && exactWebPage)) {
 		TextUtilities::Trim(left);
@@ -4823,7 +4858,8 @@ void ApiWrap::sendMessage(
 			localMessageId
 				? std::exchange(localMessageId, std::nullopt).value()
 				: _session->data().nextLocalMessageId());
-		auto randomId = base::RandomValue<uint64>();
+		auto randomId = (tracking && isFirst)
+			? tracking->randomId : base::RandomValue<uint64>();
 
 		TextUtilities::Trim(sending);
 
@@ -4955,6 +4991,10 @@ void ApiWrap::sendMessage(
 					draftMonoforumPeerId,
 					Api::UnixtimeFromMsgId(response.outerMsgId));
 			}
+			// Data::Histories already applied Api::Updates before this callback.
+			if (tracking && tracking->done) {
+				tracking->done(randomId, result, response);
+			}
 		};
 		const auto fail = [=](
 				const MTP::Error &error,
@@ -5008,6 +5048,9 @@ void ApiWrap::sendMessage(
 					draftMonoforumPeerId,
 					Api::UnixtimeFromMsgId(response.outerMsgId));
 			}
+			if (tracking && tracking->fail) {
+				tracking->fail(randomId, error, response);
+			}
 		};
 		const auto mtpShortcut = Data::ShortcutIdToMTP(
 			_session,
@@ -5015,7 +5058,7 @@ void ApiWrap::sendMessage(
 		if (exactWebPage
 			&& !ignoreWebPage
 			&& (manualWebPage || sending.empty())) {
-			histories.sendPreparedMessage(
+			const auto queueId = histories.sendPreparedMessage(
 				history,
 				action.replyTo,
 				randomId,
@@ -5036,8 +5079,9 @@ void ApiWrap::sendMessage(
 					MTP_long(starsPaid),
 					Api::SuggestToMTP(action.options.suggest)
 				), done, fail);
+			if (!notifyTrackedQueue(queueId, randomId)) return;
 		} else {
-			histories.sendPreparedMessage(
+			const auto queueId = histories.sendPreparedMessage(
 				history,
 				action.replyTo,
 				randomId,
@@ -5058,8 +5102,12 @@ void ApiWrap::sendMessage(
 					Api::SuggestToMTP(action.options.suggest),
 					MTPInputRichMessage()
 				), done, fail);
+			if (!notifyTrackedQueue(queueId, randomId)) return;
 		}
 		isFirst = false;
+	}
+	if (tracking && !trackedQueued) {
+		rejectTracked(QStringLiteral("NATIVE_SEND_NOT_QUEUED"));
 	}
 
 	finishForwarding(action);

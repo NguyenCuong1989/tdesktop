@@ -47,9 +47,47 @@ function Invoke-LedgerSmoke {
   return $process.ExitCode
 }
 Remove-Item -LiteralPath $ledger, $corrupted -ErrorAction SilentlyContinue
+# Segment rollover is an extension of the SAME hash chain, not a reset.
+$segments = Join-Path $out 'segmented.jsonl'
+Get-ChildItem -Path $out -Filter 'segmented.jsonl*' -File | Remove-Item -Force
+if ((Invoke-LedgerSmoke -Mode 'segmented-write' -Path $segments) -ne 0) {
+    throw 'Segmented append across capacity limit failed'
+}
+if ((Invoke-LedgerSmoke -Mode 'segmented-reopen' -Path $segments) -ne 0) {
+    throw 'Reopen of verified segments and next append failed'
+}
+$segmentFiles = @(Get-ChildItem -Path $out -Filter 'segmented.jsonl*' -File)
+if ($segmentFiles.Count -lt 3) { throw 'Segment test needs at least three files' }
+foreach ($variant in @('gap', 'tamper')) {
+    $variantDir = Join-Path $out ('segment-' + $variant)
+    New-Item -Path $variantDir -ItemType Directory -Force | Out-Null
+    foreach ($file in $segmentFiles) {
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $variantDir $file.Name) -Force
+    }
+    $variantBase = Join-Path $variantDir 'segmented.jsonl'
+    $middle = $variantBase + '.000001'
+    if ($variant -eq 'gap') {
+        Remove-Item -LiteralPath $middle
+    } else {
+        $originalContent = [IO.File]::ReadAllText($middle)
+        $changedContent = $originalContent.Replace('test.segmented-ledger', 'tampered.segmented-ledger')
+        if ($changedContent -eq $originalContent) { throw 'Tamper fixture not found' }
+        [IO.File]::WriteAllText($middle, $changedContent, [Text.UTF8Encoding]::new($false))
+    }
+    if ((Invoke-LedgerSmoke -Mode 'segmented-reject' -Path $variantBase) -ne 0) {
+        throw ('Missing/tampered middle segment wrongly accepted: ' + $variant)
+    }
+}
+Write-Output '[PASS] bounded segments preserve global hash/replay and reject missing or tampered middle history'
 & $exe 'action-state-domain' $ledger
 if ($LASTEXITCODE -ne 0) { throw "Action/state domain binding failed: $LASTEXITCODE" }
 Write-Output '[PASS] read-only state evidence cannot authorize native write actions'
+& $exe 'approval-revalidation-gate' $ledger
+if ($LASTEXITCODE -ne 0) { throw "Creator approval revalidation gate failed: $LASTEXITCODE" }
+Write-Output '[PASS] delayed Creator approval requires account, policy and fresh APΩ revalidation'
+& $exe 'native-send-projection' $ledger
+if ($LASTEXITCODE -ne 0) { throw "Native send projection gate failed: $LASTEXITCODE" }
+Write-Output '[PASS] native send cannot close from ACK or uncorrelated local message'
 & $exe 'storage-policy' $ledger
 if ($LASTEXITCODE -ne 0) { throw "Ledger storage policy failed: $LASTEXITCODE" }
 Write-Output '[PASS] ledger storage is bounded without deleting evidence'
@@ -218,6 +256,15 @@ foreach ($mode in @('recovery-ambiguous-write', 'recovery-ambiguous-reopen')) {
     if ($LASTEXITCODE -ne 0) { throw "Ambiguous RPC recovery $mode failed: $LASTEXITCODE" }
     Write-Output "[PASS] $mode"
 }
+$preDispatchRejectLedger = Join-Path $out 'omega-native-send-pre-dispatch-rejected.jsonl'
+Remove-Item -LiteralPath $preDispatchRejectLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('send-pre-dispatch-rejected-write', 'send-pre-dispatch-rejected-reopen')) {
+    & $exe $mode $preDispatchRejectLedger
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native pre-dispatch rejection $mode failed: $LASTEXITCODE"
+    }
+    Write-Output "[PASS] $mode"
+}
 $writeRecoveryLedger = Join-Path $out 'omega-native-send-recovery-valid.jsonl'
 Remove-Item -LiteralPath $writeRecoveryLedger -ErrorAction SilentlyContinue
 foreach ($mode in @(
@@ -232,6 +279,20 @@ foreach ($mode in @(
     }
     Write-Output "[PASS] $mode"
 }
+$peerIdentityLedger = Join-Path $out 'omega-native-send-peer-identity.jsonl'
+Remove-Item -LiteralPath $peerIdentityLedger -ErrorAction SilentlyContinue
+foreach ($mode in @(
+    'send-peer-identity-write',
+    'send-peer-identity-reopen',
+    'send-peer-identity-close-reopen',
+    'send-peer-identity-final-reopen'
+)) {
+    & $exe $mode $peerIdentityLedger
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native write peer identity $mode failed: $LASTEXITCODE"
+    }
+    Write-Output "[PASS] $mode"
+}
 $dispatchGapLedger = Join-Path $out 'omega-native-send-dispatch-gap-valid.jsonl'
 Remove-Item -LiteralPath $dispatchGapLedger -ErrorAction SilentlyContinue
 foreach ($mode in @('send-ack-without-dispatched-write', 'send-ack-without-dispatched-reopen')) {
@@ -241,6 +302,61 @@ foreach ($mode in @('send-ack-without-dispatched-write', 'send-ack-without-dispa
     }
     Write-Output "[PASS] $mode"
 }
+$conflictLedger = Join-Path $out 'omega-native-send-conflicting-intent-valid.jsonl'
+Remove-Item -LiteralPath $conflictLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('send-conflicting-intent-write', 'send-conflicting-intent-reopen', 'send-conflicting-intent-late-close', 'send-conflicting-intent-final-reopen')) {
+    & $exe $mode $conflictLedger
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native write conflicting intent $mode failed: $LASTEXITCODE"
+    }
+    Write-Output "[PASS] $mode"
+}
+$payloadConflictLedger = Join-Path $out 'omega-native-send-conflicting-payload.jsonl'
+Remove-Item -LiteralPath $payloadConflictLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('send-conflicting-payload-write', 'send-conflicting-payload-reopen')) {
+    & $exe $mode $payloadConflictLedger
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native write payload identity $mode failed: $LASTEXITCODE"
+    }
+    Write-Output "[PASS] $mode"
+}
+$duplicateReadLedger = Join-Path $out 'omega-recovery-conflicting-read-intent.jsonl'
+Remove-Item -LiteralPath $duplicateReadLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('recovery-read-duplicate-write', 'recovery-read-duplicate-reopen')) {
+    & $exe $mode $duplicateReadLedger
+    if ($LASTEXITCODE -ne 0) { throw "Native read duplicate intent $mode failed: $LASTEXITCODE" }
+    Write-Output "[PASS] $mode"
+}
+$readAckLedger = Join-Path $out 'omega-recovery-read-ack-gate.jsonl'
+Remove-Item -LiteralPath $readAckLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('recovery-read-ack-gate-write', 'recovery-read-ack-gate-reopen')) {
+    & $exe $mode $readAckLedger
+    if ($LASTEXITCODE -ne 0) { throw "Native read ACK gate $mode failed: $LASTEXITCODE" }
+    Write-Output "[PASS] $mode"
+}
+$correlatedReadLedger = Join-Path $out 'omega-recovery-correlated-read.jsonl'
+Remove-Item -LiteralPath $correlatedReadLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('recovery-read-correlation-write', 'recovery-read-correlation-reopen')) {
+    & $exe $mode $correlatedReadLedger
+    if ($LASTEXITCODE -ne 0) { throw "Native read RPC correlation $mode failed: $LASTEXITCODE" }
+    Write-Output "[PASS] $mode"
+}
+$invalidReadLedger = Join-Path $out 'omega-recovery-invalid-read-request-id.jsonl'
+Remove-Item -LiteralPath $invalidReadLedger -ErrorAction SilentlyContinue
+foreach ($mode in @('recovery-read-id-invalid-write', 'recovery-read-id-invalid-reopen')) {
+    & $exe $mode $invalidReadLedger
+    if ($LASTEXITCODE -ne 0) { throw "Native read request ID replay $mode failed: $LASTEXITCODE" }
+    Write-Output "[PASS] $mode"
+}
+$invalidReadAudit = & (Join-Path $PSScriptRoot 'apo_behavior_audit.ps1') -LedgerPath $invalidReadLedger -MaxEvents 100 | ConvertFrom-Json
+if (!$invalidReadAudit.evaluatedPrefixIntegrityValid -or
+    $invalidReadAudit.eventTotals.eventCount -ne 5 -or
+    $invalidReadAudit.eventTotals.parseErrors -ne 0 -or
+    $invalidReadAudit.eventTotals.invalidRequestIds -ne 3 -or
+    $invalidReadAudit.nativeAPOReadTraces[0].readOnlyE2EVerified) {
+    throw 'Malformed RPC IDs must remain integrity-valid but cannot prove native read E2E'
+}
+Write-Output '[PASS] audit distinguishes malformed RPC identity from JSON/hash corruption'
 $recoveryLedger = Join-Path $out 'omega-recovery-valid.jsonl'
 Remove-Item -LiteralPath $recoveryLedger -ErrorAction SilentlyContinue
 foreach ($mode in @('recovery-write', 'recovery-reopen', 'recovery-closed')) {

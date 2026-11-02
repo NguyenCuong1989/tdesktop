@@ -410,9 +410,19 @@ public:
 		std::shared_ptr<const Iv::RichPage> page,
 		const MTPInputRichMessage &richMessage,
 		SendAction action);
+	// Optional observer of the existing Telegram send/update pipeline.
+	// This does not send a second request or bypass Data::Histories.
+	struct TrackedTextSend {
+		uint64 randomId = 0;
+		Fn<void(uint64, int)> queued;
+		Fn<void(uint64, const QString&)> rejected;
+		Fn<void(uint64, const MTPUpdates&, const MTP::Response&)> done;
+		Fn<void(uint64, const MTP::Error&, const MTP::Response&)> fail;
+	};
 	void sendMessage(
 		MessageToSend &&message,
-		std::optional<MsgId> localMessageId = std::nullopt);
+		std::optional<MsgId> localMessageId = std::nullopt,
+		std::shared_ptr<TrackedTextSend> tracking = nullptr);
 	void sendBotStart(
 		std::shared_ptr<Ui::Show> show,
 		not_null<UserData*> bot,

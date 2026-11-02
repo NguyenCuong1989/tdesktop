@@ -31,6 +31,7 @@ struct NativeReadRecoveryEvidence {
     QString requestId;
     QString phase;
     int64 timestampMs = 0;
+    bool serverAcknowledged = false;
     bool postconditionVerified = false;
 };
 
@@ -44,6 +45,14 @@ struct NativeWriteRecoveryEvidence {
     int64 timestampMs = 0;
     bool serverAcknowledged = false;
     bool postconditionVerified = false;
+    QString textSha256;
+    QString targetSha256;
+    QString serverMessageId;
+    QString peerId;
+    bool peerIsChannel = false;
+    QString recoveryRequestId;
+    QString recoveryRpcMethod;
+    bool recoveryResponseContainsMessage = false;
 };
 
 struct OmegaStateEvidence {
@@ -154,6 +163,7 @@ private:
 
 	mutable QMutex _mutex;
 	QString _filePath;
+	int _segmentIndex = 0; // 0 is the unchanged legacy raw_behavior.jsonl.
 	std::unique_ptr<QFile> _file;
 	QString _lastHash;
 	int64 _sequence = 0;

@@ -11,6 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QMap>
 #include <QtCore/QMutex>
+#include <QtCore/QSet>
 #include <QtCore/QString>
 #include <functional>
 
@@ -45,6 +46,14 @@ enum class ActionPhase {
         && matchedLocalDialogs == serverDialogs;
 }
 
+// Only a Telegram-native HistoryItem created from the correlated server
+// message ID, in the same active account and with exact outgoing text, proves
+// the postcondition. A server ACK or a local optimistic item alone does not.
+[[nodiscard]] constexpr bool NativeSendProjectionConfirmed(
+	bool sameSession, bool mappedMessageId, bool outgoing, bool exactText) {
+	return sameSession && mappedMessageId && outgoing && exactText;
+}
+
 // A native operation must stay bound to the authenticated account that
 // produced its verified state, including after an approval delay.
 [[nodiscard]] constexpr bool NativeAccountBindingConfirmed(
@@ -52,6 +61,13 @@ enum class ActionPhase {
     return initiatingAccountUserId > 0
         && currentAccountUserId > 0
         && initiatingAccountUserId == currentAccountUserId;
+}
+
+// A delayed Creator approval is valid only while the original account,
+// authority policy and the exact APΩ evidence still pass revalidation.
+[[nodiscard]] constexpr bool NativeApprovalMayProceed(
+    bool accountBound, bool authorityPermitted, bool apomegaRevalidated) {
+    return accountBound && authorityPermitted && apomegaRevalidated;
 }
 
 // The ledger observation scope is SHA-256(account ID | native working directory).
@@ -104,6 +120,7 @@ struct PendingAction {
 	QString actionType;
 	QString target;
 	QJsonObject parameters;
+	ApoStateQuad candidateState;
 	QString rationale;
 	int64 initiatingAccountUserId = 0; // Native account binding; never logged.
 	ActionPhase phase = ActionPhase::Planned;
@@ -131,6 +148,10 @@ public:
 	// User denied a pending action via UI
 	void rejectAction(const QString &actionId, const QString &reason);
 
+	// Reconcile only previously acknowledged native writes. This performs
+	// read-only Telegram getMessages calls; it never retries sendMessage.
+	void reconcilePendingNativeWrites(const QString &accountScope);
+
 	[[nodiscard]] std::vector<PendingAction> listPendingActions() const;
 
 private:
@@ -144,6 +165,8 @@ private:
 
 	mutable QMutex _mutex;
 	QMap<QString, PendingAction> _pendingActions;
+	QSet<QString> _nativeWriteRecoveryInFlight;
+	QMap<QString, int64> _nativeWriteRecoveryLastAttemptMs;
 };
 
 } // namespace apo

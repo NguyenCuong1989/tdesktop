@@ -17,6 +17,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_peer.h"
 #include "data/data_user.h"
 #include "data/data_channel.h"
+#include "data/data_chat_participant_status.h"
+#include "data/data_premium_limits.h"
+#include "data/components/ephemeral_messages.h"
 #include "base/random.h"
 #include "dialogs/dialogs_main_list.h"
 #include "history/history.h"
@@ -53,6 +56,7 @@ void ActionExecutor::submitAction(
 	action.actionType = actionType;
 	action.target = target;
 	action.parameters = parameters;
+	action.candidateState = candidateState;
 	action.rationale = rationale;
 	action.phase = ActionPhase::Planned;
 	action.proposedTimeMs = nowMs;
@@ -267,26 +271,50 @@ void ActionExecutor::approveAction(const QString &actionId) {
 	verifyPayload[QStringLiteral("action_id")] = actionId;
 	const auto currentSession = Core::App().someSessionExists()
 		? Core::App().activeAccount().maybeSession() : nullptr;
-	if (!currentSession || !action.initiatingAccountUserId
-		|| currentSession->userId().bare != action.initiatingAccountUserId) {
-		verifyPayload[QStringLiteral("result")] = QStringLiteral("APPROVAL_REJECTED_ACCOUNT_CHANGED");
-		verifyPayload[QStringLiteral("new_phase")] = QStringLiteral("REJECTED");
-		RecordBehavior(EventType::ApoVerify, actionId,
-			QStringLiteral("apo.authority.ui"), verifyPayload);
+	const auto accountBound = NativeAccountBindingConfirmed(
+		action.initiatingAccountUserId,
+		currentSession ? currentSession->userId().bare : 0);
+	// Authorization may have changed while this action awaited approval.
+	const auto currentAuthority = AuthorityManager::Instance().getActionAuthority(action.actionType);
+	const auto authorityPermitted =
+		currentAuthority == AuthorityLevel::RequireApproval
+		|| currentAuthority == AuthorityLevel::AutoExecuteAllowed;
+	// Re-run the exact verifier against the state pair captured with this
+	// pending action. A prior VERIFIED event is not a reusable approval token.
+	VerificationResult revalidation;
+	if (accountBound && authorityPermitted) {
+		revalidation = ApoVerifier::Instance().verifyAction(
+			action.actionType,
+			action.target,
+			action.parameters,
+			action.candidateState);
+	}
+	if (!NativeApprovalMayProceed(
+		accountBound, authorityPermitted, revalidation.passed)) {
+		if (!accountBound) {
+			verifyPayload[QStringLiteral("result")] =
+				QStringLiteral("APPROVAL_REJECTED_ACCOUNT_CHANGED");
+			verifyPayload[QStringLiteral("new_phase")] = QStringLiteral("REJECTED");
+			RecordBehavior(EventType::ApoVerify, actionId,
+				QStringLiteral("apo.authority.ui"), verifyPayload);
+		} else if (!authorityPermitted) {
+			verifyPayload[QStringLiteral("result")] =
+				QStringLiteral("APPROVAL_REVOKED_BY_POLICY");
+			verifyPayload[QStringLiteral("new_phase")] = QStringLiteral("REJECTED");
+			RecordBehavior(EventType::ApoVerify, actionId,
+				QStringLiteral("apo.authority.gate"), verifyPayload);
+		} else {
+			verifyPayload[QStringLiteral("result")] =
+				QStringLiteral("APPROVAL_REJECTED_APO_REVALIDATION_FAILED");
+			verifyPayload[QStringLiteral("reason")] = revalidation.rationale;
+			verifyPayload[QStringLiteral("new_phase")] = QStringLiteral("REJECTED");
+			RecordBehavior(EventType::ApoVerify, actionId,
+				QStringLiteral("apo.authority.revalidation"), verifyPayload);
+		}
 		if (action.callback) action.callback(false);
 		return;
 	}
-	// Authorization may have changed while this action awaited approval.
-	const auto currentAuthority = AuthorityManager::Instance().getActionAuthority(action.actionType);
-	if (currentAuthority != AuthorityLevel::RequireApproval
-		&& currentAuthority != AuthorityLevel::AutoExecuteAllowed) {
-		verifyPayload[QStringLiteral("result")] = QStringLiteral("APPROVAL_REVOKED_BY_POLICY");
-		RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("apo.authority.gate"), verifyPayload);
-		if (action.callback) {
-			action.callback(false);
-		}
-		return;
-	}
+	verifyPayload[QStringLiteral("proof_hash")] = revalidation.proofHash;
 	verifyPayload[QStringLiteral("result")] = QStringLiteral("USER_EXPLICIT_APPROVAL");
 	verifyPayload[QStringLiteral("phase")] = ActionPhaseToString(ActionPhase::Verified);
 	if (!RecordBehavior(EventType::ApoVerify, actionId, QStringLiteral("ui.approval_dialog"), verifyPayload)) {
@@ -334,6 +362,337 @@ void ActionExecutor::rejectAction(const QString &actionId, const QString &reason
 	}
 }
 
+void ActionExecutor::reconcilePendingNativeWrites(const QString &accountScope) {
+	if (accountScope.isEmpty() || !Core::App().someSessionExists()) {
+		return;
+	}
+	const auto session = Core::App().activeAccount().maybeSession();
+	if (!session || !session->userId()
+		|| !NativeAccountScopeConfirmed(
+			session->userId().bare, cWorkingDir(), accountScope)) {
+		return;
+	}
+
+	const auto validSha256 = [](const QString &value) {
+		const auto encoded = value.toLatin1();
+		return value.size() == 64
+			&& QString::fromLatin1(encoded) == value
+			&& QByteArray::fromHex(encoded).size() == 32
+			&& QByteArray::fromHex(encoded).toHex() == encoded;
+	};
+	const auto nowMs = QDateTime::currentMSecsSinceEpoch();
+	constexpr auto kMaxConcurrentNativeWriteRecoveries = 4;
+	const auto pending = BehaviorLedger::Instance().unresolvedNativeWrites(
+		accountScope);
+	for (const auto &write : pending) {
+		// Recovery is read-only and only resolves writes with a durable,
+		// method-correlated server ACK and server message ID. A missing ACK or
+		// ID remains UNKNOWN_OUTCOME; it is never converted into a resend.
+		if (write.accountScope != accountScope
+			|| !write.serverAcknowledged
+			|| write.serverMessageId.isEmpty()
+			|| write.requestId.isEmpty()
+			|| write.randomIdHex.isEmpty()
+			|| write.peerId.isEmpty()
+			|| !validSha256(write.textSha256)
+			|| !validSha256(write.targetSha256)
+			|| write.phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+			|| write.phase == QStringLiteral("SERVER_MESSAGE_ID_MISMATCH")
+			|| write.phase == QStringLiteral("CORRELATION_MISMATCH")
+			|| write.phase == QStringLiteral("REQUEST_ID_MISMATCH")
+			|| write.phase == QStringLiteral("ACCOUNT_SCOPE_MISMATCH")
+			|| write.phase == QStringLiteral("PEER_ID_MISMATCH")
+			|| write.phase == QStringLiteral("ACK_NATIVE_METHOD_MISMATCH")) {
+			continue;
+		}
+
+		bool requestValid = false;
+		const auto originalRequestId = write.requestId.toLongLong(&requestValid);
+		if (!requestValid || originalRequestId <= 0
+			|| originalRequestId > 9007199254740991LL) {
+			continue;
+		}
+		bool randomValid = false;
+		const auto randomId = write.randomIdHex.toULongLong(&randomValid, 16);
+		if (!randomValid || !randomId
+			|| QString::number(randomId, 16) != write.randomIdHex) {
+			continue;
+		}
+		bool peerIdValid = false;
+		const auto serializedPeer = write.peerId.toULongLong(&peerIdValid);
+		if (!peerIdValid || !serializedPeer
+			|| QString::number(serializedPeer) != write.peerId) {
+			continue;
+		}
+		bool messageIdValid = false;
+		const auto messageIdValue = write.serverMessageId.toInt(&messageIdValid);
+		if (!messageIdValid || messageIdValue <= 0) {
+			continue;
+		}
+
+		const auto peerId = DeserializePeerId(serializedPeer);
+		if ((!peerIsUser(peerId) && !peerIsChat(peerId) && !peerIsChannel(peerId))
+			|| peerIsChannel(peerId) != write.peerIsChannel) {
+			continue;
+		}
+		// Resolve through Telegram's native peer factory. After restart the
+		// peer may not be loaded in the dialogs list yet; the read-only server
+		// response below hydrates it through processExistingMessages().
+		auto peer = session->data().peer(peerId);
+		if (peer->id != peerId || peer->isChannel() != write.peerIsChannel) {
+			continue;
+		}
+		const auto channel = peer->asChannel();
+		if (write.peerIsChannel != (channel != nullptr)) {
+			continue;
+		}
+		const auto messageId = static_cast<MsgId>(messageIdValue);
+		const auto recoveryMethod = write.peerIsChannel
+			? QStringLiteral("channels.getMessages")
+			: QStringLiteral("messages.getMessages");
+		const auto actionId = write.actionId;
+		{
+			QMutexLocker locker(&_mutex);
+			if (_nativeWriteRecoveryInFlight.contains(actionId)
+				|| _nativeWriteRecoveryInFlight.size()
+					>= kMaxConcurrentNativeWriteRecoveries) {
+				continue;
+			}
+			const auto lastAttempt = _nativeWriteRecoveryLastAttemptMs.value(
+				actionId, 0);
+			if (lastAttempt > 0
+				&& (nowMs < lastAttempt || nowMs - lastAttempt < 60000)) {
+				continue;
+			}
+			_nativeWriteRecoveryInFlight.insert(actionId);
+			_nativeWriteRecoveryLastAttemptMs.insert(actionId, nowMs);
+		}
+		const auto finish = [this, actionId] {
+			QMutexLocker locker(&_mutex);
+			_nativeWriteRecoveryInFlight.remove(actionId);
+		};
+
+		QJsonObject intent;
+		intent[QStringLiteral("action_id")] = actionId;
+		intent[QStringLiteral("account_scope")] = accountScope;
+		intent[QStringLiteral("request_id")] = originalRequestId;
+		intent[QStringLiteral("random_id_hex")] = write.randomIdHex;
+		intent[QStringLiteral("peer_id")] = write.peerId;
+		intent[QStringLiteral("peer_is_channel")] = write.peerIsChannel;
+		intent[QStringLiteral("native_method")] = recoveryMethod;
+		intent[QStringLiteral("recovery_rpc_method")] = recoveryMethod;
+		intent[QStringLiteral("server_message_id")] = messageIdValue;
+		intent[QStringLiteral("text_sha256")] = write.textSha256;
+		intent[QStringLiteral("target_sha256")] = write.targetSha256;
+		intent[QStringLiteral("new_phase")] =
+			QStringLiteral("RECOVERY_DISPATCH_INTENT");
+		intent[QStringLiteral("result")] =
+			QStringLiteral("NATIVE_RECOVERY_READBACK_INTENT_PERSISTED");
+		if (!RecordBehavior(EventType::Execution, actionId,
+			QStringLiteral("apo.executor.native"), intent)) {
+			finish();
+			continue;
+		}
+
+		const auto dispatchPersisted = std::make_shared<bool>(false);
+		const auto queuedRequestId = std::make_shared<mtpRequestId>(0);
+		const auto onDone = [
+				session, peer, channel, write, accountScope, originalRequestId,
+				messageId, messageIdValue, recoveryMethod, dispatchPersisted,
+				queuedRequestId, finish](
+				const MTPmessages_Messages &result,
+				mtpRequestId recoveryRequestId) {
+			if (!*dispatchPersisted) {
+				finish();
+				return;
+			}
+			if (recoveryRequestId <= 0
+				|| recoveryRequestId != *queuedRequestId
+				|| recoveryRequestId > 9007199254740991ULL) {
+				QJsonObject unresolved;
+				unresolved[QStringLiteral("action_id")] = write.actionId;
+				unresolved[QStringLiteral("account_scope")] = accountScope;
+				unresolved[QStringLiteral("request_id")] = originalRequestId;
+				unresolved[QStringLiteral("recovery_request_id")] =
+					static_cast<qint64>(recoveryRequestId);
+				unresolved[QStringLiteral("recovery_rpc_method")] = recoveryMethod;
+				unresolved[QStringLiteral("random_id_hex")] = write.randomIdHex;
+				unresolved[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
+				unresolved[QStringLiteral("result")] =
+					QStringLiteral("NATIVE_RECOVERY_RPC_CORRELATION_MISMATCH");
+				RecordBehavior(EventType::ObservedResult, write.actionId,
+					QStringLiteral("apo.executor.native"), unresolved);
+				finish();
+				return;
+			}
+
+			// Require the server readback itself to contain the requested
+			// non-empty message. A stale cached HistoryItem must never turn an
+			// empty/deleted server response into a recovered send.
+			const auto responseContainsMessage = result.match(
+				[](const MTPDmessages_messagesNotModified &) {
+					return false;
+				},
+				[&](const auto &data) {
+					for (const auto &entry : data.vmessages().v) {
+						if (entry.type() == mtpc_message
+							&& entry.c_message().vid().v == messageId.bare
+							&& peerFromMTP(entry.c_message().vpeer_id()) == peer->id) {
+							return true;
+						}
+					}
+					return false;
+				});
+			// Reuse Telegram's native decoder/projection path. The RPC is
+			// read-only and addresses only the persisted peer + server message ID.
+			session->data().processExistingMessages(channel, result);
+			const auto sameSession = Core::App().someSessionExists()
+				&& Core::App().activeAccount().maybeSession() == session
+				&& session->userId()
+				&& NativeAccountScopeConfirmed(
+					session->userId().bare, cWorkingDir(), accountScope);
+			const auto item = sameSession
+				? session->data().message(peer->id, messageId)
+				: nullptr;
+			const auto samePeer = item && item->history()
+				&& item->history()->peer->id == peer->id;
+			const auto observedTextHash = samePeer
+				? QString::fromLatin1(QCryptographicHash::hash(
+					item->originalText().text.toUtf8(),
+					QCryptographicHash::Sha256).toHex())
+				: QString();
+			const auto exactText = samePeer
+				&& observedTextHash == write.textSha256;
+			const auto observed = responseContainsMessage
+				&& NativeSendProjectionConfirmed(
+					sameSession,
+					samePeer && item->id == messageId,
+					samePeer && item->out(),
+					exactText);
+
+			QJsonObject observation;
+			observation[QStringLiteral("action_id")] = write.actionId;
+			observation[QStringLiteral("account_scope")] = accountScope;
+			observation[QStringLiteral("request_id")] = originalRequestId;
+			observation[QStringLiteral("recovery_request_id")] =
+				static_cast<qint64>(recoveryRequestId);
+			observation[QStringLiteral("recovery_rpc_method")] = recoveryMethod;
+			observation[QStringLiteral("native_method")] =
+				QStringLiteral("messages.sendMessage");
+			observation[QStringLiteral("evidence_source")] =
+				QStringLiteral("NATIVE_RECOVERY_READBACK");
+			observation[QStringLiteral("random_id_hex")] = write.randomIdHex;
+			observation[QStringLiteral("peer_id")] = write.peerId;
+			observation[QStringLiteral("peer_is_channel")] = write.peerIsChannel;
+			observation[QStringLiteral("text_sha256")] = write.textSha256;
+			observation[QStringLiteral("target_sha256")] = write.targetSha256;
+			observation[QStringLiteral("server_message_id")] = messageIdValue;
+			observation[QStringLiteral("recovery_response_contains_message")] =
+				responseContainsMessage;
+			observation[QStringLiteral("native_projection_present")] = observed;
+			observation[QStringLiteral("new_phase")] = observed
+				? QStringLiteral("STATE_CONFIRMED")
+				: QStringLiteral("RECONCILING");
+			observation[QStringLiteral("result")] = observed
+				? QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED")
+				: QStringLiteral("NATIVE_RECOVERY_READBACK_UNCONFIRMED");
+		if (!RecordBehavior(EventType::ObservedResult, write.actionId,
+			QStringLiteral("apo.executor.native"), observation)) {
+			finish();
+			return;
+		}
+		if (observed) {
+			QJsonObject closed;
+			closed[QStringLiteral("action_id")] = write.actionId;
+			closed[QStringLiteral("account_scope")] = accountScope;
+			closed[QStringLiteral("request_id")] = originalRequestId;
+			closed[QStringLiteral("recovery_request_id")] =
+				static_cast<qint64>(recoveryRequestId);
+			closed[QStringLiteral("recovery_rpc_method")] = recoveryMethod;
+			closed[QStringLiteral("native_method")] =
+				QStringLiteral("messages.sendMessage");
+			closed[QStringLiteral("evidence_source")] =
+				QStringLiteral("NATIVE_RECOVERY_READBACK");
+			closed[QStringLiteral("random_id_hex")] = write.randomIdHex;
+			closed[QStringLiteral("peer_id")] = write.peerId;
+			closed[QStringLiteral("peer_is_channel")] = write.peerIsChannel;
+			closed[QStringLiteral("text_sha256")] = write.textSha256;
+			closed[QStringLiteral("target_sha256")] = write.targetSha256;
+			closed[QStringLiteral("server_message_id")] = messageIdValue;
+			closed[QStringLiteral("recovery_response_contains_message")] = true;
+			closed[QStringLiteral("native_projection_present")] = true;
+			closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+			closed[QStringLiteral("result")] =
+				QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
+			RecordBehavior(EventType::StateReduce, write.actionId,
+				QStringLiteral("apo.executor.native"), closed);
+		}
+		finish();
+	};
+	const auto onFail = [
+			write, accountScope, originalRequestId, recoveryMethod,
+			dispatchPersisted, queuedRequestId, finish](
+			const MTP::Error &, mtpRequestId recoveryRequestId) {
+		if (!*dispatchPersisted) {
+			finish();
+			return;
+		}
+		QJsonObject unresolved;
+		unresolved[QStringLiteral("action_id")] = write.actionId;
+		unresolved[QStringLiteral("account_scope")] = accountScope;
+		unresolved[QStringLiteral("request_id")] = originalRequestId;
+		unresolved[QStringLiteral("recovery_request_id")] =
+			static_cast<qint64>(recoveryRequestId);
+		unresolved[QStringLiteral("recovery_rpc_method")] = recoveryMethod;
+		unresolved[QStringLiteral("random_id_hex")] = write.randomIdHex;
+		unresolved[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
+		unresolved[QStringLiteral("result")] =
+			(recoveryRequestId == *queuedRequestId)
+			? QStringLiteral("NATIVE_RECOVERY_READBACK_RPC_ERROR")
+			: QStringLiteral("NATIVE_RECOVERY_RPC_CORRELATION_MISMATCH");
+		RecordBehavior(EventType::ObservedResult, write.actionId,
+			QStringLiteral("apo.executor.native"), unresolved);
+		finish();
+	};
+
+	if (channel) {
+		*queuedRequestId = session->api().request(MTPchannels_GetMessages(
+			channel->inputChannel(),
+			MTP_vector<MTPInputMessage>(
+				1, MTP_inputMessageID(MTP_int(messageId))
+		))).done(onDone).fail(onFail).send();
+	} else {
+		*queuedRequestId = session->api().request(MTPmessages_GetMessages(
+			MTP_vector<MTPInputMessage>(
+				1, MTP_inputMessageID(MTP_int(messageId))
+		))).done(onDone).fail(onFail).send();
+	}
+
+	QJsonObject dispatched;
+	dispatched[QStringLiteral("action_id")] = actionId;
+	dispatched[QStringLiteral("account_scope")] = accountScope;
+	dispatched[QStringLiteral("request_id")] = originalRequestId;
+	dispatched[QStringLiteral("recovery_request_id")] =
+		static_cast<qint64>(*queuedRequestId);
+	dispatched[QStringLiteral("recovery_rpc_method")] = recoveryMethod;
+	dispatched[QStringLiteral("random_id_hex")] = write.randomIdHex;
+	dispatched[QStringLiteral("peer_id")] = write.peerId;
+	dispatched[QStringLiteral("peer_is_channel")] = write.peerIsChannel;
+	dispatched[QStringLiteral("native_method")] = recoveryMethod;
+	dispatched[QStringLiteral("new_phase")] = *queuedRequestId
+		? QStringLiteral("RECOVERY_DISPATCHED")
+		: QStringLiteral("RECONCILING");
+	dispatched[QStringLiteral("result")] = *queuedRequestId
+		? QStringLiteral("NATIVE_RECOVERY_READBACK_QUEUED")
+		: QStringLiteral("NATIVE_RECOVERY_READBACK_NOT_QUEUED");
+	*dispatchPersisted = RecordBehavior(EventType::Execution, actionId,
+		QStringLiteral("apo.executor.native"), dispatched);
+	if (!*dispatchPersisted || !*queuedRequestId) {
+		finish();
+	}
+	}
+}
+
 void ActionExecutor::executeInternal(const PendingAction &action) {
 	if (action.actionType == u"messages.send_text"_q) {
 		// Use the existing Telegram session and MTProto sender. The fixed
@@ -366,11 +725,35 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 				peer = session->data().peerLoaded(DeserializePeerId(serialized));
 			}
 		}
-		if (!peer || text.trimmed().isEmpty()) {
+		// One verified APΩ action must map to one ordinary native send.
+		// Refuse unauthorized, paid or split payloads before persisting intent.
+		if (!peer || text.trimmed().isEmpty() || text != text.trimmed()
+			|| text.size() > Data::PremiumLimits(session).messageLengthCurrent()
+			|| !Data::CanSendTexts(peer)
+			|| peer->starsPerMessageChecked() > 0) {
 			QJsonObject blocked;
 			blocked[QStringLiteral("action_id")] = action.actionId;
 			blocked[QStringLiteral("result")] = QStringLiteral("NATIVE_TARGET_OR_TEXT_UNAVAILABLE");
 			blocked[QStringLiteral("new_phase")] = QStringLiteral("BLOCKED");
+			RecordBehavior(EventType::Execution, action.actionId,
+				QStringLiteral("apo.executor.native"), blocked);
+			if (action.callback) action.callback(false);
+			return;
+		}
+		// Keep Telegram's native send preparation, including the loaded
+		// History, message policy and local-item registration. Reject special
+		// ephemeral sends: they do not satisfy this text-action contract.
+		auto outgoing = Api::MessageToSend(
+			Api::SendAction(session->data().history(peer->id)));
+		outgoing.action.clearDraft = false;
+		outgoing.textWithTags.text = text;
+		outgoing.webPage.removed = true;
+		if (session->ephemeralMessages().wouldSend(outgoing)) {
+			QJsonObject blocked;
+			blocked[QStringLiteral("action_id")] = action.actionId;
+			blocked[QStringLiteral("new_phase")] = QStringLiteral("BLOCKED");
+			blocked[QStringLiteral("result")] =
+				QStringLiteral("NATIVE_EPHEMERAL_SEND_UNSUPPORTED");
 			RecordBehavior(EventType::Execution, action.actionId,
 				QStringLiteral("apo.executor.native"), blocked);
 			if (action.callback) action.callback(false);
@@ -382,6 +765,10 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 		const auto randomHex = QString::number(randomId, 16);
 		const auto textHash = QString::fromUtf8(QCryptographicHash::hash(
 			text.toUtf8(), QCryptographicHash::Sha256).toHex());
+		const auto targetHash = QString::fromUtf8(QCryptographicHash::hash(
+			action.target.toUtf8(), QCryptographicHash::Sha256).toHex());
+		const auto peerId = QString::number(SerializePeerId(peer->id));
+		const auto peerIsChannel = peer->isChannel();
 		const auto accountScope =
 			action.parameters.value(QStringLiteral("apo_account_scope")).toString();
 		QJsonObject intent;
@@ -392,9 +779,9 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 		intent[QStringLiteral("random_id_hex")] = randomHex;
 		intent[QStringLiteral("text_sha256")] = textHash;
 		intent[QStringLiteral("text_length")] = text.size();
-		intent[QStringLiteral("target_sha256")] = QString::fromUtf8(
-			QCryptographicHash::hash(action.target.toUtf8(),
-				QCryptographicHash::Sha256).toHex());
+		intent[QStringLiteral("target_sha256")] = targetHash;
+		intent[QStringLiteral("peer_id")] = peerId;
+		intent[QStringLiteral("peer_is_channel")] = peerIsChannel;
 		intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
 		intent[QStringLiteral("result")] = QStringLiteral("NATIVE_DISPATCH_INTENT_PERSISTED");
 		if (!RecordBehavior(EventType::Execution, action.actionId,
@@ -402,77 +789,143 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 			if (action.callback) action.callback(false);
 			return;
 		}
-		const auto requestId = std::make_shared<mtpRequestId>(0);
-		*requestId = session->api().request(MTPmessages_SendMessage(
-			MTP_flags(MTPmessages_SendMessage::Flag::f_no_webpage),
-			peer->input(),
-			MTPInputReplyTo(),
-			MTP_string(text),
-			MTP_long(randomId),
-			MTPReplyMarkup(),
-			MTPvector<MTPMessageEntity>(),
-			MTP_int(0),
-			MTP_int(0),
-			MTP_inputPeerEmpty(),
-			MTPInputQuickReplyShortcut(),
-			MTP_long(0),
-			MTP_long(0),
-			MTPSuggestedPost(),
-			MTPInputRichMessage()
-		)).done([action, requestId,
-				session, peer, randomId, randomHex, text](const MTPUpdates &result) {
-			// PREPARING_DISPATCH was durably recorded before the RPC was sent.
-			// A failed DISPATCHED append must not suppress a real server ACK.
-			QJsonObject ack;
-			ack[QStringLiteral("action_id")] = action.actionId;
-			ack[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
-			ack[QStringLiteral("random_id_hex")] = randomHex;
-			ack[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
-			ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
-			ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
-			if (!RecordBehavior(EventType::ObservedResult, action.actionId,
-				QStringLiteral("apo.executor.native"), ack)) {
+		// ApiWrap is Telegram's established send pipeline: it registers a
+		// local HistoryItem and random_id, and Data::Histories applies
+		// Api::Updates before calling this completion observer.
+		auto tracking = std::make_shared<ApiWrap::TrackedTextSend>();
+		tracking->randomId = randomId;
+		tracking->queued = [
+				action, randomId, randomHex, accountScope,
+				textHash, targetHash, peerId, peerIsChannel](
+				uint64 queuedRandomId, int nativeQueueId) {
+			QJsonObject queued;
+			queued[QStringLiteral("action_id")] = action.actionId;
+			queued[QStringLiteral("account_scope")] = accountScope;
+			queued[QStringLiteral("native_method")] =
+				QStringLiteral("messages.sendMessage");
+			queued[QStringLiteral("random_id_hex")] = randomHex;
+			queued[QStringLiteral("text_sha256")] = textHash;
+			queued[QStringLiteral("target_sha256")] = targetHash;
+			queued[QStringLiteral("peer_id")] = peerId;
+			queued[QStringLiteral("peer_is_channel")] = peerIsChannel;
+			queued[QStringLiteral("native_queue_id")] = nativeQueueId;
+			const auto correlated = queuedRandomId == randomId
+				&& nativeQueueId > 0;
+			queued[QStringLiteral("new_phase")] = correlated
+				? QStringLiteral("QUEUED") : QStringLiteral("RECONCILING");
+			queued[QStringLiteral("result")] = correlated
+				? QStringLiteral("NATIVE_APIWRAP_SEND_SUBMITTED")
+				: QStringLiteral("NATIVE_APIWRAP_QUEUE_CORRELATION_INVALID");
+			RecordBehavior(EventType::Execution, action.actionId,
+				QStringLiteral("apo.executor.native"), queued);
+		};
+		tracking->rejected = [
+				action, randomId, randomHex, accountScope,
+				textHash, targetHash, peerId, peerIsChannel](
+				uint64 rejectedRandomId, const QString &reason) {
+			QJsonObject rejected;
+			rejected[QStringLiteral("action_id")] = action.actionId;
+			rejected[QStringLiteral("account_scope")] = accountScope;
+			rejected[QStringLiteral("native_method")] =
+				QStringLiteral("messages.sendMessage");
+			rejected[QStringLiteral("random_id_hex")] = randomHex;
+			rejected[QStringLiteral("text_sha256")] = textHash;
+			rejected[QStringLiteral("target_sha256")] = targetHash;
+			rejected[QStringLiteral("peer_id")] = peerId;
+			rejected[QStringLiteral("peer_is_channel")] = peerIsChannel;
+			const auto correlated = rejectedRandomId == randomId;
+			rejected[QStringLiteral("new_phase")] = correlated
+				? QStringLiteral("REJECTED_BEFORE_DISPATCH")
+				: QStringLiteral("RECONCILING");
+			rejected[QStringLiteral("result")] = correlated
+				? reason
+				: QStringLiteral("NATIVE_APIWRAP_REJECTION_CORRELATION_INVALID");
+			RecordBehavior(EventType::Execution, action.actionId,
+				QStringLiteral("apo.executor.native"), rejected);
+			if (action.callback) action.callback(false);
+		};
+		tracking->done = [action, session, peer, text, randomHex, randomId, accountScope, textHash, targetHash, peerId, peerIsChannel](
+				uint64 completedRandomId,
+				const MTPUpdates &result,
+				const MTP::Response &response) {
+			const auto requestId = response.requestId;
+			const auto correlationValid = (completedRandomId != 0)
+				&& completedRandomId == randomId
+				&& requestId > 0;
+			if (!correlationValid) {
+				QJsonObject unresolved;
+				unresolved[QStringLiteral("action_id")] = action.actionId;
+				unresolved[QStringLiteral("random_id_hex")] = randomHex;
+				unresolved[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
+				unresolved[QStringLiteral("result")] =
+					QStringLiteral("NATIVE_SEND_CALLBACK_CORRELATION_INVALID");
+				RecordBehavior(EventType::ObservedResult, action.actionId,
+					QStringLiteral("apo.executor.native"), unresolved);
 				if (action.callback) action.callback(false);
 				return;
 			}
-			// The server response is not an observed message. Correlate
-			// Telegram's message_id to the persisted random_id first.
+			// The MTProto send response may contain a shortSentMessage or an
+			// updateMessageID linked to the exact random_id. Telegram's native
+			// update pipeline already processed the response before this hook.
 			MsgId messageId = 0;
 			if (result.type() == mtpc_updateShortSentMessage) {
 				messageId = result.c_updateShortSentMessage().vid().v;
 			} else {
-				const auto inspectUpdates = [&](const auto &updates) {
+				const auto matchRandomId = [&](const auto &updates) {
 					for (const auto &update : updates.vupdates().v) {
 						if (update.type() == mtpc_updateMessageID) {
 							const auto &mapping = update.c_updateMessageID();
-							if (mapping.vrandom_id().v == randomId) {
+							if (mapping.vrandom_id().v == completedRandomId) {
 								messageId = mapping.vid().v;
 							}
 						}
 					}
 				};
 				if (result.type() == mtpc_updates) {
-					inspectUpdates(result.c_updates());
+					matchRandomId(result.c_updates());
 				} else if (result.type() == mtpc_updatesCombined) {
-					inspectUpdates(result.c_updatesCombined());
+					matchRandomId(result.c_updatesCombined());
 				}
+			}
+			QJsonObject ack;
+			ack[QStringLiteral("action_id")] = action.actionId;
+			ack[QStringLiteral("request_id")] = static_cast<qint64>(requestId);
+			ack[QStringLiteral("random_id_hex")] = randomHex;
+			ack[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+            ack[QStringLiteral("account_scope")] = accountScope;
+            ack[QStringLiteral("text_sha256")] = textHash;
+            ack[QStringLiteral("target_sha256")] = targetHash;
+            ack[QStringLiteral("peer_id")] = peerId;
+            ack[QStringLiteral("peer_is_channel")] = peerIsChannel;
+			if (messageId > 0) {
+				ack[QStringLiteral("server_message_id")] = messageId.bare;
+			}
+			ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+			ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+			if (!RecordBehavior(EventType::ObservedResult, action.actionId,
+					QStringLiteral("apo.executor.native"), ack)) {
+				if (action.callback) action.callback(false);
+				return;
 			}
 			const auto sameSession = Core::App().someSessionExists()
 				&& Core::App().activeAccount().maybeSession() == session
 				&& NativeAccountBindingConfirmed(
 					action.initiatingAccountUserId, session->userId().bare);
-			if (sameSession) {
-				session->api().applyUpdates(result, randomId);
-			}
-			// A matching server message ID alone is insufficient: the native
-			// projection must also be the outgoing text requested by APΩ.
 			const auto projectedItem = (sameSession && messageId > 0)
 				? session->data().message(peer->id, messageId) : nullptr;
-			const auto observed = projectedItem && projectedItem->out()
-				&& projectedItem->originalText().text == text;
+			const auto observed = NativeSendProjectionConfirmed(
+				sameSession, messageId > 0, projectedItem && projectedItem->out(),
+				projectedItem && projectedItem->originalText().text == text);
 			QJsonObject observation;
 			observation[QStringLiteral("action_id")] = action.actionId;
-			observation[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
+            observation[QStringLiteral("account_scope")] = accountScope;
+            observation[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+            observation[QStringLiteral("text_sha256")] = textHash;
+            observation[QStringLiteral("target_sha256")] = targetHash;
+            observation[QStringLiteral("peer_id")] = peerId;
+            observation[QStringLiteral("peer_is_channel")] = peerIsChannel;
+            observation[QStringLiteral("evidence_source")] = QStringLiteral("NATIVE_SEND_CALLBACK");
+			observation[QStringLiteral("request_id")] = static_cast<qint64>(requestId);
 			observation[QStringLiteral("random_id_hex")] = randomHex;
 			observation[QStringLiteral("server_message_id")] = messageId.bare;
 			observation[QStringLiteral("native_projection_present")] = observed;
@@ -482,135 +935,61 @@ void ActionExecutor::executeInternal(const PendingAction &action) {
 				? QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED")
 				: QStringLiteral("NATIVE_SEND_POSTCONDITION_UNCONFIRMED");
 			if (!RecordBehavior(EventType::ObservedResult, action.actionId,
-				QStringLiteral("apo.executor.native"), observation)) {
+					QStringLiteral("apo.executor.native"), observation) || !observed) {
+				// Delayed PTS / getDifference can still resolve the same local
+				// message. Never retry this write or infer success from its ACK.
 				if (action.callback) action.callback(false);
 				return;
 			}
-			if (!observed) {
-				// Direct MTProto sends do not register a pending HistoryItem.
-				// updateShortSentMessage carries an ID but no message body,
-				// so the native projection may legitimately be absent at ACK.
-				// Read back from the same peer, verify ID + exact text, and
-				// feed Telegram's existing message store before closing.
-				if (!sameSession || messageId <= 0) {
-					if (action.callback) action.callback(false);
-					return;
-				}
-				session->api().request(MTPmessages_GetHistory(
-					peer->input(),
-					MTP_int(0), MTP_int(0), MTP_int(0),
-					MTP_int(30), MTP_int(0), MTP_int(0), MTP_long(0)
-				)).done([action, requestId, session, peer, messageId,
-						randomHex, text](const MTPmessages_Messages &history) {
-					const auto stillBound = Core::App().someSessionExists()
-						&& Core::App().activeAccount().maybeSession() == session
-						&& NativeAccountBindingConfirmed(
-							action.initiatingAccountUserId, session->userId().bare);
-					bool serverMessageMatched = false;
-					if (stillBound) {
-						history.match(
-							[](const MTPDmessages_messagesNotModified &) {},
-							[&](const auto &data) {
-								for (const auto &item : data.vmessages().v) {
-									item.match([&](const MTPDmessage &message) {
-										if (message.vid().v == messageId
-											&& message.is_out()
-											&& qs(message.vmessage()) == text) {
-											serverMessageMatched = true;
-										}
-									}, [](const auto &) {});
-								}
-							});
-						if (serverMessageMatched) {
-							session->data().processExistingMessages(
-								peer->asChannel(), history);
-						}
-					}
-					const auto projectedItem = serverMessageMatched
-						? session->data().message(peer->id, messageId) : nullptr;
-					const auto projected = projectedItem && projectedItem->out()
-						&& projectedItem->originalText().text == text;
-					QJsonObject checked;
-					checked[QStringLiteral("action_id")] = action.actionId;
-					checked[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
-					checked[QStringLiteral("random_id_hex")] = randomHex;
-					checked[QStringLiteral("server_message_id")] = messageId.bare;
-					checked[QStringLiteral("server_readback_matched")] = serverMessageMatched;
-					checked[QStringLiteral("native_projection_present")] = projected;
-					checked[QStringLiteral("new_phase")] = projected
-						? QStringLiteral("STATE_CONFIRMED")
-						: QStringLiteral("RECONCILING");
-					checked[QStringLiteral("result")] = projected
-						? QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED")
-						: QStringLiteral("NATIVE_SEND_READBACK_UNCONFIRMED");
-					if (!RecordBehavior(EventType::ObservedResult, action.actionId,
-							QStringLiteral("apo.executor.native"), checked)
-						|| !projected) {
-						if (action.callback) action.callback(false);
-						return;
-					}
-					QJsonObject closed;
-					closed[QStringLiteral("action_id")] = action.actionId;
-					closed[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
-					closed[QStringLiteral("random_id_hex")] = randomHex;
-					closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
-					closed[QStringLiteral("result")] =
-						QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
-					const auto persisted = RecordBehavior(EventType::StateReduce,
-						action.actionId, QStringLiteral("apo.executor.native"), closed);
-					if (action.callback) action.callback(persisted);
-				}).fail([action, requestId, randomHex](const MTP::Error &) {
-					QJsonObject uncertain;
-					uncertain[QStringLiteral("action_id")] = action.actionId;
-					uncertain[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
-					uncertain[QStringLiteral("random_id_hex")] = randomHex;
-					uncertain[QStringLiteral("new_phase")] = QStringLiteral("RECONCILING");
-					uncertain[QStringLiteral("result")] =
-						QStringLiteral("NATIVE_SEND_READBACK_RPC_ERROR");
-					RecordBehavior(EventType::ObservedResult, action.actionId,
-						QStringLiteral("apo.executor.native"), uncertain);
-					if (action.callback) action.callback(false);
-				}).send();
-				return;
-			}
-			QJsonObject completed;
-			completed[QStringLiteral("action_id")] = action.actionId;
-			completed[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
-			completed[QStringLiteral("random_id_hex")] = randomHex;
-			completed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
-			completed[QStringLiteral("result")] = QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
+			QJsonObject closed;
+			closed[QStringLiteral("action_id")] = action.actionId;
+            closed[QStringLiteral("account_scope")] = accountScope;
+            closed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+            closed[QStringLiteral("text_sha256")] = textHash;
+            closed[QStringLiteral("target_sha256")] = targetHash;
+            closed[QStringLiteral("peer_id")] = peerId;
+            closed[QStringLiteral("peer_is_channel")] = peerIsChannel;
+            closed[QStringLiteral("evidence_source")] = QStringLiteral("NATIVE_SEND_CALLBACK");
+            closed[QStringLiteral("server_message_id")] = messageId.bare;
+			closed[QStringLiteral("request_id")] = static_cast<qint64>(requestId);
+			closed[QStringLiteral("random_id_hex")] = randomHex;
+			closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+			closed[QStringLiteral("result")] =
+				QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
 			const auto persisted = RecordBehavior(EventType::StateReduce,
-				action.actionId, QStringLiteral("apo.executor.native"), completed);
+				action.actionId, QStringLiteral("apo.executor.native"), closed);
 			if (action.callback) action.callback(persisted);
-		}).fail([action, requestId, randomHex](const MTP::Error &) {
-			// Preserve the uncertain outcome even if DISPATCHED was not persisted.
+		};
+		tracking->fail = [action, randomId, randomHex, peerId, peerIsChannel](
+				uint64 failedRandomId,
+				const MTP::Error &,
+				const MTP::Response &response) {
 			QJsonObject uncertain;
 			uncertain[QStringLiteral("action_id")] = action.actionId;
-			uncertain[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
+			uncertain[QStringLiteral("request_id")] =
+				static_cast<qint64>(response.requestId);
 			uncertain[QStringLiteral("random_id_hex")] = randomHex;
-			uncertain[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
-			uncertain[QStringLiteral("new_phase")] = QStringLiteral("UNKNOWN_OUTCOME");
-			uncertain[QStringLiteral("result")] = QStringLiteral("NATIVE_RPC_ERROR");
+			uncertain[QStringLiteral("peer_id")] = peerId;
+			uncertain[QStringLiteral("peer_is_channel")] = peerIsChannel;
+			uncertain[QStringLiteral("native_method")] =
+				QStringLiteral("messages.sendMessage");
+			uncertain[QStringLiteral("native_random_id_correlated")] =
+				(failedRandomId == randomId);
+			uncertain[QStringLiteral("new_phase")] =
+				QStringLiteral("UNKNOWN_OUTCOME");
+			uncertain[QStringLiteral("result")] =
+				QStringLiteral("NATIVE_RPC_ERROR");
 			RecordBehavior(EventType::ObservedResult, action.actionId,
 				QStringLiteral("apo.executor.native"), uncertain);
 			if (action.callback) action.callback(false);
-		}).send();
-		QJsonObject dispatched;
-		dispatched[QStringLiteral("action_id")] = action.actionId;
-		dispatched[QStringLiteral("request_id")] = static_cast<qint64>(*requestId);
-		dispatched[QStringLiteral("random_id_hex")] = randomHex;
-		dispatched[QStringLiteral("new_phase")] = *requestId
-			? QStringLiteral("DISPATCHED") : QStringLiteral("UNKNOWN_OUTCOME");
-		dispatched[QStringLiteral("result")] = *requestId
-			? QStringLiteral("NATIVE_REQUEST_QUEUED")
-			: QStringLiteral("NATIVE_REQUEST_NOT_ACCEPTED");
-		// The durable intent already marks this write as potentially sent.
-		// Failure to append DISPATCHED cannot erase later ACK evidence.
-		RecordBehavior(EventType::Execution, action.actionId,
-			QStringLiteral("apo.executor.native"), dispatched);
-		if (!*requestId && action.callback) action.callback(false);
+		};
+		// Telegram itself creates the optimistic local item and enqueues the
+		// request through Data::Histories::sendPreparedMessage. Only one
+		// message is allowed per APΩ action to keep its random_id unambiguous.
+		session->api().sendMessage(std::move(outgoing), std::nullopt, tracking);
 		return;
 	}
+
 	if (action.actionType == u"dialogs.inspect_server"_q) {
 		// First bounded, non-mutating APΩ operation. Reuse the same native
 		// Telegram API sender that drives the client, not a new transport.

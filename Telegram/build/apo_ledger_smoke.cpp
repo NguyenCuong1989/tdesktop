@@ -23,6 +23,15 @@ int main(int argc, char **argv) {
         if (apo::ApoActionStateDomainMatches(QStringLiteral("unknown"), inspect)) return 215;
         return 0;
     }
+    if (mode == QStringLiteral("native-send-projection")) {
+        // A genuine Telegram update may not be promoted from ACK alone.
+        if (apo::NativeSendProjectionConfirmed(false, true, true, true)) return 221;
+        if (apo::NativeSendProjectionConfirmed(true, false, true, true)) return 222;
+        if (apo::NativeSendProjectionConfirmed(true, true, false, true)) return 223;
+        if (apo::NativeSendProjectionConfirmed(true, true, true, false)) return 224;
+        if (!apo::NativeSendProjectionConfirmed(true, true, true, true)) return 225;
+        return 0;
+    }
     if (mode == QStringLiteral("storage-policy")) {
         constexpr auto mebibyte = apo::int64(1024) * 1024;
         if (!apo::LedgerStorageAllowsAppend(511 * mebibyte,
@@ -62,6 +71,13 @@ int main(int argc, char **argv) {
         if (apo::NativeAccountBindingConfirmed(-1, -1)) return 133;
         if (apo::NativeAccountBindingConfirmed(123, 456)) return 134;
         if (!apo::NativeAccountBindingConfirmed(123, 123)) return 135;
+        return 0;
+    }
+    if (mode == QStringLiteral("approval-revalidation-gate")) {
+        if (apo::NativeApprovalMayProceed(false, true, true)) return 226;
+        if (apo::NativeApprovalMayProceed(true, false, true)) return 227;
+        if (apo::NativeApprovalMayProceed(true, true, false)) return 228;
+        if (!apo::NativeApprovalMayProceed(true, true, true)) return 229;
         return 0;
     }
     if (mode == QStringLiteral("account-scope-binding")) {
@@ -129,8 +145,38 @@ int main(int argc, char **argv) {
     } else if (mode == QStringLiteral("write-failure")) {
         limits.maxLedgerBytes = 1;
         limits.reservedStorageBytes = 0;
+    } else if (mode.startsWith(QStringLiteral("segmented-"))) {
+        limits.maxLedgerBytes = 1400;
+        limits.reservedStorageBytes = 0;
     }
     ledger.init(path, limits);
+    if (mode == QStringLiteral("segmented-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 231;
+        for (int n = 0; n != 12; ++n) {
+            QJsonObject payload;
+            payload[QStringLiteral("ordinal")] = n;
+            payload[QStringLiteral("padding")] = QString(180, QChar('x'));
+            if (!ledger.recordEvent(apo::EventType::UiEvent,
+                QStringLiteral("segment-%1").arg(n),
+                QStringLiteral("test.segmented-ledger"), payload)) return 232;
+        }
+        ledger.flush();
+        if (ledger.totalEvents() != 12 || !QFile::exists(path + QStringLiteral(".000001"))) return 233;
+        return 0;
+    }
+    if (mode == QStringLiteral("segmented-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 12) return 234;
+        QJsonObject payload;
+        payload[QStringLiteral("recovered")] = true;
+        if (!ledger.recordEvent(apo::EventType::StateReduce,
+            QStringLiteral("after-segment-replay"),
+            QStringLiteral("test.segmented-ledger"), payload)) return 235;
+        ledger.flush();
+        return ledger.totalEvents() == 13 ? 0 : 236;
+    }
+    if (mode == QStringLiteral("segmented-reject")) {
+        return ledger.isInitialized() ? 237 : 0;
+    }
     // Probe an existing copied native ledger without mutating it.
     if (mode == QStringLiteral("ledger-replay-probe")) {
         if (!ledger.isInitialized()) return 191;
@@ -494,6 +540,172 @@ int main(int argc, char **argv) {
             && ledger.unresolvedNativeReads(QStringLiteral("foreign-scope")).isEmpty()
             ? 0 : 160;
     }
+    // A second pre-dispatch intent with the same action_id must never
+    // replace the original account scope or MTProto random_id on replay.
+    if (mode == QStringLiteral("send-conflicting-intent-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 230;
+        QJsonObject intent;
+        intent[QStringLiteral("action_id")] = QStringLiteral("write-conflict");
+        intent[QStringLiteral("account_scope")] = scope;
+        intent[QStringLiteral("random_id_hex")] = QStringLiteral("aa11");
+        intent[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("write-conflict"), QStringLiteral("apo.executor.native"),
+                intent)) return 231;
+        auto conflicting = intent;
+        conflicting[QStringLiteral("account_scope")] = QStringLiteral("foreign-scope");
+        conflicting[QStringLiteral("random_id_hex")] = QStringLiteral("bb22");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("write-conflict"), QStringLiteral("apo.executor.native"),
+                conflicting)) return 232;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].randomIdHex == QStringLiteral("aa11")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).isEmpty()
+            ? 0 : 233;
+    }
+    if (mode == QStringLiteral("send-conflicting-intent-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 2) return 234;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].randomIdHex == QStringLiteral("aa11")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).isEmpty()
+            ? 0 : 235;
+    }
+    // A duplicate action with the same random_id but different payload
+    // identity is ambiguous even when its account and random_id match.
+    if (mode == QStringLiteral("send-conflicting-payload-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 300;
+        QJsonObject intent;
+        intent[QStringLiteral("action_id")] = QStringLiteral("payload-conflict");
+        intent[QStringLiteral("account_scope")] = scope;
+        intent[QStringLiteral("random_id_hex")] = QStringLiteral("aa11");
+        intent[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        intent[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        intent[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
+        intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("payload-conflict"), QStringLiteral("apo.executor.native"),
+                intent)) return 301;
+        auto conflicting = intent;
+        conflicting[QStringLiteral("text_sha256")] = QString(64, QChar('c'));
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("payload-conflict"), QStringLiteral("apo.executor.native"),
+                conflicting)) return 302;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].randomIdHex == QStringLiteral("aa11")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            ? 0 : 303;
+    }
+    if (mode == QStringLiteral("send-conflicting-payload-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 2) return 304;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].randomIdHex == QStringLiteral("aa11")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            ? 0 : 305;
+    }
+    // A later ACK + native projection for the FIRST intent cannot clear a
+    // duplicate action_id whose second pre-dispatch intent has another
+    // account/random_id. That conflict is unresolved until investigated.
+    if (mode == QStringLiteral("send-conflicting-intent-late-close")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 2) return 236;
+        QJsonObject evidence;
+        evidence[QStringLiteral("action_id")] = QStringLiteral("write-conflict");
+        evidence[QStringLiteral("random_id_hex")] = QStringLiteral("aa11");
+        evidence[QStringLiteral("request_id")] = 923;
+        evidence[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        evidence[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+        evidence[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("write-conflict"), QStringLiteral("apo.executor.native"),
+                evidence)) return 237;
+        evidence[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
+        evidence[QStringLiteral("result")] = QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED");
+        evidence[QStringLiteral("server_message_id")] = 7001;
+        evidence[QStringLiteral("native_projection_present")] = true;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("write-conflict"), QStringLiteral("apo.executor.native"),
+                evidence)) return 238;
+        evidence[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        evidence[QStringLiteral("result")] = QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("write-conflict"), QStringLiteral("apo.executor.native"),
+                evidence)) return 239;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].randomIdHex == QStringLiteral("aa11")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).isEmpty()
+            ? 0 : 240;
+    }
+    if (mode == QStringLiteral("send-conflicting-intent-final-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 5) return 241;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].randomIdHex == QStringLiteral("aa11")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).isEmpty()
+            ? 0 : 242;
+    }
+    // A native API preflight rejection is terminal for recovery, but remains
+    // durable evidence. Late ACK/CLOSED records must not resurrect the write.
+    if (mode == QStringLiteral("send-pre-dispatch-rejected-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 261;
+        const auto actionId = QStringLiteral("write-rejected-before-dispatch");
+        const auto randomHex = QStringLiteral("deadbeef0001");
+        const auto textHash = QString(64, QChar('a'));
+        const auto targetHash = QString(64, QChar('b'));
+        QJsonObject intent;
+        intent[QStringLiteral("action_id")] = actionId;
+        intent[QStringLiteral("account_scope")] = scope;
+        intent[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        intent[QStringLiteral("random_id_hex")] = randomHex;
+        intent[QStringLiteral("text_sha256")] = textHash;
+        intent[QStringLiteral("target_sha256")] = targetHash;
+        intent[QStringLiteral("peer_id")] = QStringLiteral("42");
+        intent[QStringLiteral("peer_is_channel")] = false;
+        intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
+        if (!ledger.recordEvent(apo::EventType::Execution, actionId,
+                QStringLiteral("apo.executor.native"), intent)) return 262;
+        QJsonObject rejected = intent;
+        rejected[QStringLiteral("new_phase")] =
+            QStringLiteral("REJECTED_BEFORE_DISPATCH");
+        rejected[QStringLiteral("result")] =
+            QStringLiteral("NATIVE_SEND_POLICY_REJECTED");
+        if (!ledger.recordEvent(apo::EventType::Execution, actionId,
+                QStringLiteral("apo.executor.native"), rejected)) return 263;
+        if (!ledger.unresolvedNativeWrites(scope).isEmpty()) return 264;
+        QJsonObject lateAck = rejected;
+        lateAck[QStringLiteral("request_id")] = 101;
+        lateAck[QStringLiteral("server_message_id")] = 202;
+        lateAck[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+        lateAck[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), lateAck)) return 265;
+        QJsonObject lateClose = lateAck;
+        lateClose[QStringLiteral("evidence_source")] =
+            QStringLiteral("NATIVE_SEND_CALLBACK");
+        lateClose[QStringLiteral("native_projection_present")] = true;
+        lateClose[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        lateClose[QStringLiteral("result")] =
+            QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
+        if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
+                QStringLiteral("apo.executor.native"), lateClose)) return 266;
+        return ledger.unresolvedNativeWrites(scope).isEmpty()
+            && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).isEmpty()
+            ? 0 : 267;
+    }
+    if (mode == QStringLiteral("send-pre-dispatch-rejected-reopen")) {
+        return ledger.isInitialized() && ledger.totalEvents() == 4
+            && ledger.unresolvedNativeWrites(scope).isEmpty()
+            && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).isEmpty()
+            ? 0 : 268;
+    }
     // Durable native send: never erase an UNKNOWN write after restart,
     // and never accept CLOSED until ACK and native postcondition both exist.
     if (mode == QStringLiteral("send-unknown-write")) {
@@ -503,6 +715,8 @@ int main(int argc, char **argv) {
         intent[QStringLiteral("account_scope")] = scope;
         intent[QStringLiteral("random_id_hex")] = QStringLiteral("a1234567ff");
         intent[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        intent[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        intent[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
         intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
         if (!ledger.recordEvent(apo::EventType::Execution,
                 QStringLiteral("write-action"), QStringLiteral("apo.executor.native"),
@@ -565,6 +779,8 @@ int main(int argc, char **argv) {
         intent[QStringLiteral("account_scope")] = scope;
         intent[QStringLiteral("random_id_hex")] = randomHex;
         intent[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        intent[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        intent[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
         intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
         if (!ledger.recordEvent(apo::EventType::Execution, actionId,
                 QStringLiteral("apo.executor.native"), intent)) return 202;
@@ -581,6 +797,7 @@ int main(int argc, char **argv) {
             || uncorrelated[0].phase != QStringLiteral("CORRELATION_MISSING")) return 210;
         QJsonObject noRequestAck;
         noRequestAck[QStringLiteral("action_id")] = actionId;
+        noRequestAck[QStringLiteral("account_scope")] = scope;
         noRequestAck[QStringLiteral("random_id_hex")] = randomHex;
         noRequestAck[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
         noRequestAck[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
@@ -590,10 +807,45 @@ int main(int argc, char **argv) {
         if (missingRequest.size() != 1 || missingRequest[0].serverAcknowledged
             || missingRequest[0].phase != QStringLiteral("ACK_REQUEST_ID_MISSING"))
             return 217;
+        // A fractional JSON request ID must not be truncated to the
+        // already-correlated integer request and accepted as an ACK.
+        QJsonObject fractionalAck = noRequestAck;
+        fractionalAck[QStringLiteral("request_id")] = 903.75;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), fractionalAck)) return 224;
+        const auto fractional = ledger.unresolvedNativeWrites(scope);
+        if (fractional.size() != 1 || fractional[0].serverAcknowledged
+            || fractional[0].phase != QStringLiteral("ACK_REQUEST_ID_INVALID"))
+            return 225;
+        QJsonObject overflowAck = noRequestAck;
+        overflowAck[QStringLiteral("request_id")] = 1.0e20;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), overflowAck)) return 226;
+        const auto overflow = ledger.unresolvedNativeWrites(scope);
+        if (overflow.size() != 1 || overflow[0].serverAcknowledged
+            || overflow[0].phase != QStringLiteral("ACK_REQUEST_ID_INVALID"))
+            return 227;
+        // A response from a different native RPC is not a send ACK,
+        // even when its request and random IDs happen to match.
+        QJsonObject wrongMethodAck = noRequestAck;
+        wrongMethodAck[QStringLiteral("request_id")] = 903;
+        wrongMethodAck[QStringLiteral("native_method")] =
+            QStringLiteral("messages.getDialogs");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), wrongMethodAck))
+            return 294;
+        const auto wrongMethod = ledger.unresolvedNativeWrites(scope);
+        if (wrongMethod.size() != 1 || wrongMethod[0].serverAcknowledged
+            || !wrongMethod[0].requestId.isEmpty()
+            || wrongMethod[0].phase != QStringLiteral("ACK_NATIVE_METHOD_MISMATCH"))
+            return 295;
         QJsonObject ack;
         ack[QStringLiteral("action_id")] = actionId;
+        ack[QStringLiteral("account_scope")] = scope;
         ack[QStringLiteral("random_id_hex")] = randomHex;
         ack[QStringLiteral("request_id")] = 903;
+        ack[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        ack[QStringLiteral("server_message_id")] = 1903;
         ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
         ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
         if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
@@ -604,7 +856,11 @@ int main(int argc, char **argv) {
             || afterAck[0].requestId != QStringLiteral("903")) return 204;
         QJsonObject observed;
         observed[QStringLiteral("action_id")] = actionId;
+        observed[QStringLiteral("account_scope")] = scope;
         observed[QStringLiteral("random_id_hex")] = randomHex;
+        observed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        observed[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        observed[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
         observed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
         observed[QStringLiteral("result")] = QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED");
         // A forged success label with no actual native projection must not
@@ -627,8 +883,24 @@ int main(int argc, char **argv) {
             || mismatched[0].requestId != QStringLiteral("903")
             || mismatched[0].phase != QStringLiteral("REQUEST_ID_MISMATCH"))
             return 219;
+        observed[QStringLiteral("request_id")] = 903;
+        observed[QStringLiteral("server_message_id")] = 1903;
+        observed[QStringLiteral("native_projection_present")] = true;
+        auto mismatchedPayload = observed;
+        mismatchedPayload[QStringLiteral("text_sha256")] = QString(64, QChar('c'));
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), mismatchedPayload)) return 296;
+        const auto wrongPayload = ledger.unresolvedNativeWrites(scope);
+        if (wrongPayload.size() != 1 || wrongPayload[0].postconditionVerified
+            || wrongPayload[0].phase != QStringLiteral("POSTCONDITION_IDENTITY_MISMATCH"))
+            return 297;
         QJsonObject closed;
         closed[QStringLiteral("action_id")] = actionId;
+        closed[QStringLiteral("account_scope")] = scope;
+        closed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        closed[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        closed[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
+        closed[QStringLiteral("server_message_id")] = 1903;
         closed[QStringLiteral("random_id_hex")] = randomHex;
         closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
         closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
@@ -646,9 +918,23 @@ int main(int argc, char **argv) {
         if (premature.size() != 1 || premature[0].postconditionVerified
             || premature[0].phase != QStringLiteral("CLOSED_WITHOUT_COMPLETE_EVIDENCE"))
             return 214;
+        // A fractional or unrepresentable server message ID cannot be a
+        // native Telegram message projection, even with a matching RPC ID.
         observed[QStringLiteral("request_id")] = 903;
-        observed[QStringLiteral("server_message_id")] = 1903;
+        observed[QStringLiteral("server_message_id")] = 1903.5;
         observed[QStringLiteral("native_projection_present")] = true;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 241;
+        const auto fractionalMessage = ledger.unresolvedNativeWrites(scope);
+        if (fractionalMessage.size() != 1
+            || fractionalMessage[0].postconditionVerified) return 242;
+        observed[QStringLiteral("server_message_id")] = 1.0e20;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 243;
+        const auto overflowMessage = ledger.unresolvedNativeWrites(scope);
+        if (overflowMessage.size() != 1
+            || overflowMessage[0].postconditionVerified) return 244;
+        observed[QStringLiteral("server_message_id")] = 1903;
         if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
                 QStringLiteral("apo.executor.native"), observed)) return 212;
         if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
@@ -656,7 +942,7 @@ int main(int argc, char **argv) {
         return ledger.unresolvedNativeWrites(scope).empty() ? 0 : 207;
     }
     if (mode == QStringLiteral("send-ack-without-dispatched-reopen")) {
-        return ledger.isInitialized() && ledger.totalEvents() == 10
+        return ledger.isInitialized() && ledger.totalEvents() == 16
             && ledger.unresolvedNativeWrites(scope).empty()
             && ledger.unresolvedNativeWrites(QStringLiteral("foreign-scope")).empty()
             ? 0 : 208;
@@ -666,8 +952,10 @@ int main(int argc, char **argv) {
         if (ledger.unresolvedNativeWrites(scope).size() != 1) return 173;
         QJsonObject ack;
         ack[QStringLiteral("action_id")] = QStringLiteral("write-action");
+        ack[QStringLiteral("account_scope")] = scope;
         ack[QStringLiteral("request_id")] = 807;
         ack[QStringLiteral("random_id_hex")] = QStringLiteral("a1234567ff");
+        ack[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
         ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
         ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
         if (!ledger.recordEvent(apo::EventType::ObservedResult,
@@ -675,8 +963,12 @@ int main(int argc, char **argv) {
                 ack)) return 174;
         QJsonObject observed;
         observed[QStringLiteral("action_id")] = QStringLiteral("write-action");
+        observed[QStringLiteral("account_scope")] = scope;
         observed[QStringLiteral("request_id")] = 807;
         observed[QStringLiteral("random_id_hex")] = QStringLiteral("a1234567ff");
+        observed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        observed[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        observed[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
         observed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
         observed[QStringLiteral("result")] =
             QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED");
@@ -687,6 +979,11 @@ int main(int argc, char **argv) {
                 observed)) return 175;
         QJsonObject closed;
         closed[QStringLiteral("action_id")] = QStringLiteral("write-action");
+        closed[QStringLiteral("account_scope")] = scope;
+        closed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        closed[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        closed[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
+        closed[QStringLiteral("server_message_id")] = 1807;
         closed[QStringLiteral("random_id_hex")] = QStringLiteral("a1234567ff");
         closed[QStringLiteral("request_id")] = 807;
         closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
@@ -702,6 +999,494 @@ int main(int argc, char **argv) {
         return ledger.unresolvedNativeWrites(scope).isEmpty()
             && ledger.unresolvedNativeWrites(QStringLiteral("other-account")).isEmpty()
             ? 0 : 179;
+    }
+    // Peer identity is part of the durable write key. It must survive replay,
+    // and neither a conflicting intent nor a readback from another peer may
+    // confirm or close the original action.
+    if (mode == QStringLiteral("send-peer-identity-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 310;
+        const auto actionId = QStringLiteral("peer-identity");
+        const auto peerId = QStringLiteral("1234567890123456789");
+        const auto randomHex = QStringLiteral("a1b2c3d4");
+        QJsonObject intent;
+        intent[QStringLiteral("action_id")] = actionId;
+        intent[QStringLiteral("account_scope")] = scope;
+        intent[QStringLiteral("random_id_hex")] = randomHex;
+        intent[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        intent[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        intent[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
+        intent[QStringLiteral("peer_id")] = peerId;
+        intent[QStringLiteral("peer_is_channel")] = false;
+        intent[QStringLiteral("new_phase")] = QStringLiteral("PREPARING_DISPATCH");
+        if (!ledger.recordEvent(apo::EventType::Execution, actionId,
+                QStringLiteral("apo.executor.native"), intent)) return 311;
+        QJsonObject ack;
+        ack[QStringLiteral("action_id")] = actionId;
+        ack[QStringLiteral("account_scope")] = scope;
+        ack[QStringLiteral("peer_id")] = peerId;
+        ack[QStringLiteral("peer_is_channel")] = false;
+        ack[QStringLiteral("request_id")] = 903;
+        ack[QStringLiteral("random_id_hex")] = randomHex;
+        ack[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        ack[QStringLiteral("server_message_id")] = 1903;
+        ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+        ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), ack)) return 312;
+
+        auto conflict = intent;
+        conflict[QStringLiteral("action_id")] = QStringLiteral("peer-conflict");
+        conflict[QStringLiteral("random_id_hex")] = QStringLiteral("bb22");
+        conflict[QStringLiteral("peer_id")] = QStringLiteral("222");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("peer-conflict"), QStringLiteral("apo.executor.native"),
+                conflict)) return 313;
+        conflict[QStringLiteral("peer_id")] = QStringLiteral("333");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("peer-conflict"), QStringLiteral("apo.executor.native"),
+                conflict)) return 314;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        auto identityFound = false;
+        auto conflictFound = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                identityFound = item.peerId == peerId
+                    && item.serverAcknowledged
+                    && item.serverMessageId == QStringLiteral("1903")
+                    && item.requestId == QStringLiteral("903");
+            } else if (item.actionId == QStringLiteral("peer-conflict")) {
+                conflictFound = item.peerId == QStringLiteral("222")
+                    && item.phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT");
+            }
+        }
+        return pending.size() == 2 && identityFound && conflictFound ? 0 : 315;
+    }
+    if (mode == QStringLiteral("send-peer-identity-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 4) return 316;
+        const auto peerId = QStringLiteral("1234567890123456789");
+        const auto actionId = QStringLiteral("peer-identity");
+        const auto randomHex = QStringLiteral("a1b2c3d4");
+        auto pending = ledger.unresolvedNativeWrites(scope);
+        if (pending.size() != 2) return 317;
+        auto identityFound = false;
+        auto conflictFound = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                identityFound = item.peerId == peerId
+                    && item.serverAcknowledged
+                    && item.serverMessageId == QStringLiteral("1903")
+                    && item.requestId == QStringLiteral("903");
+            } else if (item.actionId == QStringLiteral("peer-conflict")) {
+                conflictFound = item.peerId == QStringLiteral("222")
+                    && item.phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT");
+            }
+        }
+        if (!identityFound || !conflictFound) return 318;
+
+        QJsonObject observed;
+        observed[QStringLiteral("action_id")] = actionId;
+        observed[QStringLiteral("account_scope")] = scope;
+        observed[QStringLiteral("peer_id")] = QStringLiteral("999");
+        observed[QStringLiteral("peer_is_channel")] = false;
+        observed[QStringLiteral("request_id")] = 903;
+        observed[QStringLiteral("random_id_hex")] = randomHex;
+        observed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        observed[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        observed[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
+        observed[QStringLiteral("server_message_id")] = 1903;
+        observed[QStringLiteral("native_projection_present")] = true;
+        observed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
+        observed[QStringLiteral("result")] =
+            QStringLiteral("NATIVE_SEND_POSTCONDITION_MATCHED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 319;
+        pending = ledger.unresolvedNativeWrites(scope);
+        auto wrongPeerRejected = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                wrongPeerRejected = item.phase == QStringLiteral("PEER_ID_MISMATCH")
+                    && !item.postconditionVerified;
+            }
+        }
+        if (!wrongPeerRejected) return 320;
+
+        observed[QStringLiteral("peer_id")] = peerId;
+        observed[QStringLiteral("evidence_source")] =
+            QStringLiteral("NATIVE_RECOVERY_READBACK");
+        observed[QStringLiteral("recovery_request_id")] = 1904;
+        observed[QStringLiteral("recovery_rpc_method")] =
+            QStringLiteral("channels.getMessages");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 321;
+        pending = ledger.unresolvedNativeWrites(scope);
+        auto wrongRecoveryMethodRejected = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                wrongRecoveryMethodRejected =
+                    !item.postconditionVerified
+                    && item.phase == QStringLiteral("RECOVERY_RPC_IDENTITY_INVALID");
+            }
+        }
+        if (!wrongRecoveryMethodRejected) return 329;
+
+        observed[QStringLiteral("recovery_rpc_method")] =
+            QStringLiteral("messages.getMessages");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 330;
+        pending = ledger.unresolvedNativeWrites(scope);
+        auto missingReadbackMessageRejected = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                missingReadbackMessageRejected = !item.postconditionVerified
+                    && item.phase == QStringLiteral("RECOVERY_RESPONSE_MESSAGE_MISSING");
+            }
+        }
+        if (!missingReadbackMessageRejected) return 331;
+
+        observed[QStringLiteral("recovery_response_contains_message")] = true;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 332;
+        pending = ledger.unresolvedNativeWrites(scope);
+        auto correctProjectionAccepted = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                correctProjectionAccepted = item.postconditionVerified
+                    && item.serverMessageId == QStringLiteral("1903")
+                    && item.recoveryRequestId == QStringLiteral("1904")
+                    && item.recoveryRpcMethod == QStringLiteral("messages.getMessages")
+                    && item.recoveryResponseContainsMessage;
+            }
+        }
+        if (!correctProjectionAccepted) return 322;
+        return 0;
+    }
+    if (mode == QStringLiteral("send-peer-identity-close-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 8) return 335;
+        const auto peerId = QStringLiteral("1234567890123456789");
+        const auto actionId = QStringLiteral("peer-identity");
+        const auto randomHex = QStringLiteral("a1b2c3d4");
+        auto pending = ledger.unresolvedNativeWrites(scope);
+        if (pending.size() != 2) return 336;
+        auto recoveryRestored = false;
+        auto conflictRestored = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                recoveryRestored = item.peerId == peerId
+                    && item.serverAcknowledged
+                    && item.postconditionVerified
+                    && item.serverMessageId == QStringLiteral("1903")
+                    && item.requestId == QStringLiteral("903")
+                    && item.recoveryRequestId == QStringLiteral("1904")
+                    && item.recoveryRpcMethod == QStringLiteral("messages.getMessages")
+                    && item.recoveryResponseContainsMessage;
+            } else if (item.actionId == QStringLiteral("peer-conflict")) {
+                conflictRestored = item.peerId == QStringLiteral("222")
+                    && item.phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT");
+            }
+        }
+        if (!recoveryRestored || !conflictRestored) return 337;
+
+        QJsonObject closed;
+        closed[QStringLiteral("action_id")] = actionId;
+        closed[QStringLiteral("account_scope")] = scope;
+        closed[QStringLiteral("peer_id")] = QStringLiteral("999");
+        closed[QStringLiteral("peer_is_channel")] = false;
+        closed[QStringLiteral("request_id")] = 903;
+        closed[QStringLiteral("random_id_hex")] = randomHex;
+        closed[QStringLiteral("native_method")] = QStringLiteral("messages.sendMessage");
+        closed[QStringLiteral("text_sha256")] = QString(64, QChar('a'));
+        closed[QStringLiteral("target_sha256")] = QString(64, QChar('b'));
+        closed[QStringLiteral("server_message_id")] = 1903;
+        closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        closed[QStringLiteral("result")] =
+            QStringLiteral("SUCCESS_NATIVE_SEND_OBSERVED");
+        if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
+                QStringLiteral("apo.executor.native"), closed)) return 323;
+        pending = ledger.unresolvedNativeWrites(scope);
+        auto wrongCloseRejected = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                wrongCloseRejected = item.phase == QStringLiteral("PEER_ID_MISMATCH")
+                    && item.postconditionVerified;
+            }
+        }
+        if (!wrongCloseRejected) return 324;
+
+        closed[QStringLiteral("peer_id")] = peerId;
+        closed[QStringLiteral("evidence_source")] =
+            QStringLiteral("NATIVE_RECOVERY_READBACK");
+        closed[QStringLiteral("recovery_request_id")] = 1905;
+        closed[QStringLiteral("recovery_rpc_method")] =
+            QStringLiteral("messages.getMessages");
+        closed[QStringLiteral("recovery_response_contains_message")] = true;
+        if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
+                QStringLiteral("apo.executor.native"), closed)) return 325;
+        pending = ledger.unresolvedNativeWrites(scope);
+        auto wrongRecoveryCloseRejected = false;
+        for (const auto &item : pending) {
+            if (item.actionId == actionId) {
+                wrongRecoveryCloseRejected = item.postconditionVerified
+                    && item.phase == QStringLiteral("CLOSED_IDENTITY_MISMATCH");
+            }
+        }
+        if (!wrongRecoveryCloseRejected) return 333;
+
+        closed[QStringLiteral("recovery_request_id")] = 1904;
+        if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
+                QStringLiteral("apo.executor.native"), closed)) return 334;
+        pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].actionId == QStringLiteral("peer-conflict")
+            && pending[0].peerId == QStringLiteral("222")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            ? 0 : 326;
+    }
+    if (mode == QStringLiteral("send-peer-identity-final-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 11) return 327;
+        const auto pending = ledger.unresolvedNativeWrites(scope);
+        return pending.size() == 1
+            && pending[0].actionId == QStringLiteral("peer-conflict")
+            && pending[0].peerId == QStringLiteral("222")
+            && pending[0].phase == QStringLiteral("CONFLICTING_DISPATCH_INTENT")
+            ? 0 : 328;
+    }
+    // Reusing an action_id with a different read scope or source must not
+    // replace an in-flight native RPC, even if late callbacks claim CLOSED.
+    if (mode == QStringLiteral("recovery-read-duplicate-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 268;
+        QJsonObject planned;
+        planned[QStringLiteral("action_id")] = QStringLiteral("read-duplicate");
+        planned[QStringLiteral("action_type")] = QStringLiteral("dialogs.inspect_server");
+        planned[QStringLiteral("account_scope")] = scope;
+        planned[QStringLiteral("source_trace_id")] = QStringLiteral("source-original");
+        planned[QStringLiteral("phase")] = QStringLiteral("PLANNED");
+        if (!ledger.recordEvent(apo::EventType::Decision,
+                QStringLiteral("read-duplicate"), QStringLiteral("apo.agent_core"),
+                planned)) return 269;
+        QJsonObject dispatch;
+        dispatch[QStringLiteral("action_id")] = QStringLiteral("read-duplicate");
+        dispatch[QStringLiteral("request_id")] = 583;
+        dispatch[QStringLiteral("new_phase")] = QStringLiteral("DISPATCHED");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("read-duplicate"), QStringLiteral("apo.executor.native"),
+                dispatch)) return 270;
+        planned[QStringLiteral("account_scope")] = QStringLiteral("other-account");
+        planned[QStringLiteral("source_trace_id")] = QStringLiteral("source-conflicting");
+        if (!ledger.recordEvent(apo::EventType::Decision,
+                QStringLiteral("read-duplicate"), QStringLiteral("apo.agent_core"),
+                planned)) return 271;
+        const auto conflicted = ledger.unresolvedNativeReads(scope);
+        if (conflicted.size() != 1
+            || conflicted[0].requestId != QStringLiteral("583")
+            || conflicted[0].sourceTraceId != QStringLiteral("source-original")
+            || conflicted[0].phase != QStringLiteral("CONFLICTING_READ_INTENT")
+            || !ledger.unresolvedNativeReads(QStringLiteral("other-account")).isEmpty()) return 272;
+        QJsonObject confirmed;
+        confirmed[QStringLiteral("action_id")] = QStringLiteral("read-duplicate");
+        confirmed[QStringLiteral("request_id")] = 583;
+        confirmed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
+        confirmed[QStringLiteral("result")] =
+            QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("read-duplicate"), QStringLiteral("apo.executor.native"),
+                confirmed)) return 273;
+        QJsonObject closed;
+        closed[QStringLiteral("action_id")] = QStringLiteral("read-duplicate");
+        closed[QStringLiteral("request_id")] = 583;
+        closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_READ_ONLY");
+        if (!ledger.recordEvent(apo::EventType::StateReduce,
+                QStringLiteral("read-duplicate"), QStringLiteral("apo.executor.native"),
+                closed)) return 274;
+        const auto pending = ledger.unresolvedNativeReads(scope);
+        return pending.size() == 1
+            && pending[0].phase == QStringLiteral("CONFLICTING_READ_INTENT")
+            && !pending[0].postconditionVerified ? 0 : 275;
+    }
+    if (mode == QStringLiteral("recovery-read-duplicate-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 5) return 276;
+        const auto pending = ledger.unresolvedNativeReads(scope);
+        return pending.size() == 1
+            && pending[0].requestId == QStringLiteral("583")
+            && pending[0].sourceTraceId == QStringLiteral("source-original")
+            && pending[0].phase == QStringLiteral("CONFLICTING_READ_INTENT")
+            && !pending[0].postconditionVerified
+            && ledger.unresolvedNativeReads(QStringLiteral("other-account")).isEmpty()
+            ? 0 : 277;
+    }
+    // A malformed JSON RPC identity must not overwrite a durable read's
+    // original request identity, including after restart and RPC failure.
+    if (mode == QStringLiteral("recovery-read-id-invalid-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 245;
+        QJsonObject planned;
+        planned[QStringLiteral("action_id")] = QStringLiteral("read-invalid-id");
+        planned[QStringLiteral("action_type")] = QStringLiteral("dialogs.inspect_server");
+        planned[QStringLiteral("account_scope")] = scope;
+        planned[QStringLiteral("phase")] = QStringLiteral("PLANNED");
+        if (!ledger.recordEvent(apo::EventType::Decision,
+                QStringLiteral("read-invalid-id"), QStringLiteral("apo.agent_core"),
+                planned)) return 246;
+        QJsonObject dispatched;
+        dispatched[QStringLiteral("action_id")] = QStringLiteral("read-invalid-id");
+        dispatched[QStringLiteral("request_id")] = 583;
+        dispatched[QStringLiteral("new_phase")] = QStringLiteral("DISPATCHED");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("read-invalid-id"), QStringLiteral("apo.executor.native"),
+                dispatched)) return 247;
+        dispatched[QStringLiteral("request_id")] = 584.75;
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("read-invalid-id"), QStringLiteral("apo.executor.native"),
+                dispatched)) return 248;
+        const auto fractional = ledger.unresolvedNativeReads(scope);
+        if (fractional.size() != 1
+            || fractional[0].requestId != QStringLiteral("583")
+            || fractional[0].phase != QStringLiteral("REQUEST_ID_INVALID")) return 249;
+        dispatched[QStringLiteral("request_id")] = 1.0e20;
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("read-invalid-id"), QStringLiteral("apo.executor.native"),
+                dispatched)) return 250;
+        const auto overflow = ledger.unresolvedNativeReads(scope);
+        if (overflow.size() != 1
+            || overflow[0].requestId != QStringLiteral("583")
+            || overflow[0].phase != QStringLiteral("REQUEST_ID_INVALID")) return 251;
+        QJsonObject failed;
+        failed[QStringLiteral("action_id")] = QStringLiteral("read-invalid-id");
+        failed[QStringLiteral("request_id")] = 585.25;
+        failed[QStringLiteral("new_phase")] = QStringLiteral("FAILED");
+        failed[QStringLiteral("result")] = QStringLiteral("NATIVE_RPC_ERROR");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("read-invalid-id"), QStringLiteral("apo.executor.native"),
+                failed)) return 252;
+        const auto unknown = ledger.unresolvedNativeReads(scope);
+        return unknown.size() == 1
+            && unknown[0].requestId == QStringLiteral("583")
+            && unknown[0].phase == QStringLiteral("UNKNOWN_OUTCOME") ? 0 : 253;
+    }
+    if (mode == QStringLiteral("recovery-read-id-invalid-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 5) return 254;
+        const auto open = ledger.unresolvedNativeReads(scope);
+        return open.size() == 1
+            && open[0].actionId == QStringLiteral("read-invalid-id")
+            && open[0].requestId == QStringLiteral("583")
+            && open[0].phase == QStringLiteral("UNKNOWN_OUTCOME") ? 0 : 255;
+    }
+    // A read-only postcondition from another RPC must not close the
+    // pending native request, even when the event claims success.
+    if (mode == QStringLiteral("recovery-read-correlation-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 256;
+        QJsonObject planned;
+        planned[QStringLiteral("action_id")] = QStringLiteral("read-correlated");
+        planned[QStringLiteral("action_type")] = QStringLiteral("dialogs.inspect_server");
+        planned[QStringLiteral("account_scope")] = scope;
+        planned[QStringLiteral("phase")] = QStringLiteral("PLANNED");
+        if (!ledger.recordEvent(apo::EventType::Decision,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.agent_core"),
+                planned)) return 257;
+        QJsonObject dispatch;
+        dispatch[QStringLiteral("action_id")] = QStringLiteral("read-correlated");
+        dispatch[QStringLiteral("request_id")] = 583;
+        dispatch[QStringLiteral("new_phase")] = QStringLiteral("DISPATCHED");
+        if (!ledger.recordEvent(apo::EventType::Execution,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.executor.native"),
+                dispatch)) return 258;
+        QJsonObject confirmed;
+        confirmed[QStringLiteral("action_id")] = QStringLiteral("read-correlated");
+        confirmed[QStringLiteral("request_id")] = 584;
+        confirmed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
+        confirmed[QStringLiteral("result")] =
+            QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.executor.native"),
+                confirmed)) return 259;
+        const auto mismatched = ledger.unresolvedNativeReads(scope);
+        if (mismatched.size() != 1 || mismatched[0].postconditionVerified
+            || mismatched[0].requestId != QStringLiteral("583")) return 260;
+        QJsonObject closed;
+        closed[QStringLiteral("action_id")] = QStringLiteral("read-correlated");
+        closed[QStringLiteral("request_id")] = 584;
+        closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_READ_ONLY");
+        if (!ledger.recordEvent(apo::EventType::StateReduce,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.executor.native"),
+                closed)) return 261;
+        if (ledger.unresolvedNativeReads(scope).size() != 1) return 262;
+        confirmed[QStringLiteral("request_id")] = 583;
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.executor.native"),
+                confirmed)) return 263;
+        QJsonObject ack;
+        ack[QStringLiteral("action_id")] = QStringLiteral("read-correlated");
+        ack[QStringLiteral("request_id")] = 583;
+        ack[QStringLiteral("native_method")] = QStringLiteral("messages.getDialogs");
+        ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+        ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.executor.native"),
+                ack)) return 292;
+        closed[QStringLiteral("request_id")] = 583;
+        if (!ledger.recordEvent(apo::EventType::StateReduce,
+                QStringLiteral("read-correlated"), QStringLiteral("apo.executor.native"),
+                closed)) return 264;
+        return ledger.unresolvedNativeReads(scope).isEmpty() ? 0 : 265;
+    }
+    if (mode == QStringLiteral("recovery-read-correlation-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 7) return 266;
+        return ledger.unresolvedNativeReads(scope).isEmpty() ? 0 : 267;
+    }
+    // A read-only native projection without a persisted server ACK is not
+    // sufficient to close the same MTProto request during durable replay.
+    if (mode == QStringLiteral("recovery-read-ack-gate-write")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 280;
+        const auto actionId = QStringLiteral("read-ack-gate");
+        QJsonObject planned;
+        planned[QStringLiteral("action_id")] = actionId;
+        planned[QStringLiteral("action_type")] = QStringLiteral("dialogs.inspect_server");
+        planned[QStringLiteral("account_scope")] = scope;
+        planned[QStringLiteral("phase")] = QStringLiteral("PLANNED");
+        if (!ledger.recordEvent(apo::EventType::Decision, actionId,
+                QStringLiteral("apo.agent_core"), planned)) return 281;
+        QJsonObject dispatched;
+        dispatched[QStringLiteral("action_id")] = actionId;
+        dispatched[QStringLiteral("request_id")] = 991;
+        dispatched[QStringLiteral("new_phase")] = QStringLiteral("DISPATCHED");
+        if (!ledger.recordEvent(apo::EventType::Execution, actionId,
+                QStringLiteral("apo.executor.native"), dispatched)) return 282;
+        QJsonObject observed;
+        observed[QStringLiteral("action_id")] = actionId;
+        observed[QStringLiteral("request_id")] = 991;
+        observed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
+        observed[QStringLiteral("result")] =
+            QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), observed)) return 283;
+        QJsonObject closed;
+        closed[QStringLiteral("action_id")] = actionId;
+        closed[QStringLiteral("request_id")] = 991;
+        closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
+        closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_READ_ONLY");
+        if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
+                QStringLiteral("apo.executor.native"), closed)) return 284;
+        const auto withoutAck = ledger.unresolvedNativeReads(scope);
+        if (withoutAck.size() != 1 || !withoutAck[0].postconditionVerified
+            || withoutAck[0].serverAcknowledged) return 285;
+        QJsonObject ack;
+        ack[QStringLiteral("action_id")] = actionId;
+        ack[QStringLiteral("request_id")] = 991;
+        ack[QStringLiteral("native_method")] = QStringLiteral("messages.getDialogs");
+        ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+        ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult, actionId,
+                QStringLiteral("apo.executor.native"), ack)) return 286;
+        const auto withAck = ledger.unresolvedNativeReads(scope);
+        if (withAck.size() != 1 || !withAck[0].serverAcknowledged
+            || !withAck[0].postconditionVerified) return 287;
+        if (!ledger.recordEvent(apo::EventType::StateReduce, actionId,
+                QStringLiteral("apo.executor.native"), closed)) return 288;
+        return ledger.unresolvedNativeReads(scope).empty() ? 0 : 289;
+    }
+    if (mode == QStringLiteral("recovery-read-ack-gate-reopen")) {
+        if (!ledger.isInitialized() || ledger.totalEvents() != 6) return 290;
+        return ledger.unresolvedNativeReads(scope).empty() ? 0 : 291;
     }
     if (mode == QStringLiteral("recovery-write")) {
         if (!ledger.isInitialized() || ledger.totalEvents() != 0) return 61;
@@ -753,13 +1538,24 @@ int main(int argc, char **argv) {
         if (ledger.unresolvedNativeReads(scope).size() != 1) return 75;
         QJsonObject confirmed;
         confirmed[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        confirmed[QStringLiteral("request_id")] = 583;
         confirmed[QStringLiteral("new_phase")] = QStringLiteral("STATE_CONFIRMED");
         confirmed[QStringLiteral("result")] = QStringLiteral("NATIVE_READ_POSTCONDITION_MATCHED");
         if (!ledger.recordEvent(apo::EventType::ObservedResult, QStringLiteral("read-action-1"),
             QStringLiteral("apo.executor.native"), confirmed)) return 76;
         if (ledger.unresolvedNativeReads(scope).size() != 1) return 77;
+        QJsonObject ack;
+        ack[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        ack[QStringLiteral("request_id")] = 583;
+        ack[QStringLiteral("native_method")] = QStringLiteral("messages.getDialogs");
+        ack[QStringLiteral("new_phase")] = QStringLiteral("ACKNOWLEDGED");
+        ack[QStringLiteral("result")] = QStringLiteral("SERVER_RESPONSE_RECEIVED");
+        if (!ledger.recordEvent(apo::EventType::ObservedResult,
+                QStringLiteral("read-action-1"), QStringLiteral("apo.executor.native"),
+                ack)) return 293;
         closed = QJsonObject();
         closed[QStringLiteral("action_id")] = QStringLiteral("read-action-1");
+        closed[QStringLiteral("request_id")] = 583;
         closed[QStringLiteral("new_phase")] = QStringLiteral("CLOSED");
         closed[QStringLiteral("result")] = QStringLiteral("SUCCESS_READ_ONLY");
         if (!ledger.recordEvent(apo::EventType::StateReduce, QStringLiteral("read-action-1"),
@@ -767,7 +1563,7 @@ int main(int argc, char **argv) {
         return ledger.unresolvedNativeReads(scope).isEmpty() ? 0 : 71;
     }
     if (mode == QStringLiteral("recovery-closed")) {
-        if (!ledger.isInitialized() || ledger.totalEvents() != 7) return 72;
+        if (!ledger.isInitialized() || ledger.totalEvents() != 8) return 72;
         return ledger.unresolvedNativeReads(scope).isEmpty() ? 0 : 73;
     }
 
