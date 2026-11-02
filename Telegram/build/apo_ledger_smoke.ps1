@@ -85,6 +85,9 @@ Write-Output '[PASS] read-only state evidence cannot authorize native write acti
 & $exe 'approval-revalidation-gate' $ledger
 if ($LASTEXITCODE -ne 0) { throw "Creator approval revalidation gate failed: $LASTEXITCODE" }
 Write-Output '[PASS] delayed Creator approval requires account, policy and fresh APΩ revalidation'
+& $exe 'native-channel-input-addressability' $ledger
+if ($LASTEXITCODE -ne 0) { throw "Native channel recovery addressability failed: $LASTEXITCODE" }
+Write-Output '[PASS] channel recovery addressability predicate mirrors native InputChannel construction'
 & $exe 'native-send-projection' $ledger
 if ($LASTEXITCODE -ne 0) { throw "Native send projection gate failed: $LASTEXITCODE" }
 Write-Output '[PASS] native send cannot close from ACK or uncorrelated local message'

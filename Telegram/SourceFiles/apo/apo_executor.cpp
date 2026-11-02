@@ -436,8 +436,8 @@ void ActionExecutor::reconcilePendingNativeWrites(const QString &accountScope) {
 			continue;
 		}
 		// Resolve through Telegram's native peer factory. After restart the
-		// peer may not be loaded in the dialogs list yet; the read-only server
-		// response below hydrates it through processExistingMessages().
+		// peer may be created but unloaded; channel readback must wait until
+		// Telegram can form a valid InputChannel from native peer evidence.
 		auto peer = session->data().peer(peerId);
 		if (peer->id != peerId || peer->isChannel() != write.peerIsChannel) {
 			continue;
@@ -445,6 +445,21 @@ void ActionExecutor::reconcilePendingNativeWrites(const QString &accountScope) {
 		const auto channel = peer->asChannel();
 		if (write.peerIsChannel != (channel != nullptr)) {
 			continue;
+		}
+		if (channel) {
+			const auto loaded = channel->isLoaded();
+			const auto messageWithPeer = !loaded
+				? session->data().messageWithPeer(peerId)
+				: nullptr;
+			if (!NativeChannelInputAddressable(
+					loaded,
+					channel->accessHash() != 0,
+					messageWithPeer != nullptr)) {
+				// Do not queue an invalid InputChannel or consume the retry
+				// window. A later native dialogs/history hydration can make
+				// this same durable ACK eligible for read-only reconciliation.
+				continue;
+			}
 		}
 		const auto messageId = static_cast<MsgId>(messageIdValue);
 		const auto recoveryMethod = write.peerIsChannel

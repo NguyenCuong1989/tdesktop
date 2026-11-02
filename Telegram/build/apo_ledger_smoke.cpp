@@ -80,6 +80,15 @@ int main(int argc, char **argv) {
         if (!apo::NativeApprovalMayProceed(true, true, true)) return 229;
         return 0;
     }
+    if (mode == QStringLiteral("native-channel-input-addressability")) {
+        if (!apo::NativeChannelInputAddressable(false, true, false)) return 230;
+        if (!apo::NativeChannelInputAddressable(false, false, true)) return 231;
+        if (apo::NativeChannelInputAddressable(false, false, false)) return 232;
+        if (!apo::NativeChannelInputAddressable(true, true, false)) return 233;
+        if (apo::NativeChannelInputAddressable(true, false, true)) return 234;
+        if (apo::NativeChannelInputAddressable(true, false, false)) return 235;
+        return 0;
+    }
     if (mode == QStringLiteral("account-scope-binding")) {
         // Independent SHA-256 oracle for "123|C:/OmegaTest".
         const auto scope = QStringLiteral(

@@ -70,6 +70,13 @@ enum class ActionPhase {
     return accountBound && authorityPermitted && apomegaRevalidated;
 }
 
+// Mirror ChannelData::inputChannel(): a loaded peer needs its access hash;
+// an unloaded peer may instead be addressed by a live message-with-peer.
+[[nodiscard]] constexpr bool NativeChannelInputAddressable(
+    bool channelLoaded, bool hasAccessHash, bool hasMessageWithPeer) {
+    return hasAccessHash || (!channelLoaded && hasMessageWithPeer);
+}
+
 // The ledger observation scope is SHA-256(account ID | native working directory).
 // A valid pair from another account or profile cannot authorize this session.
 [[nodiscard]] inline bool NativeAccountScopeConfirmed(
