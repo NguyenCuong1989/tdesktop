@@ -135,7 +135,7 @@ jobs:
           cd %TBUILD%\%REPO_NAME%\Telegram
           cmake --build ..\out --config Debug --parallel
 
-      - name: Verify APΩ native objects are linked into build graph
+      - name: Verify APΩ native objects are linked into Telegram.exe
         shell: pwsh
         run: |
           $repo = "$env:TBUILD\$env:REPO_NAME"
@@ -143,6 +143,47 @@ jobs:
           $updater = Join-Path $repo "out\Debug\Updater.exe"
           if (!(Test-Path $exe)) { throw "Telegram.exe missing after native build" }
           if (!(Test-Path $updater)) { throw "Updater.exe missing after native build" }
+
+          $expectedObjects = @(
+            "apo_authority.obj",
+            "apo_behavior_ledger.obj",
+            "apo_state_bridge.obj",
+            "apo_economy_state.obj",
+            "apo_verifier.obj",
+            "apo_cognitive_loop.obj",
+            "apo_runtime.obj",
+            "apo_executor.obj"
+          )
+          $linkLogs = Get-ChildItem (Join-Path $repo "out") -Recurse -Filter "link.command.1.tlog" -File
+          $telegramLinkCommands = @(
+            foreach ($log in $linkLogs) {
+              $content = [IO.File]::ReadAllText($log.FullName)
+              if ($content -match '(?i)(?:^|[\\/])Telegram\.exe(?:["\s]|$)') {
+                [pscustomobject]@{
+                  Path = $log.FullName
+                  Content = $content
+                }
+              }
+            }
+          )
+          if ($telegramLinkCommands.Count -ne 1) {
+            throw "Expected exactly one Telegram.exe linker command; found $($telegramLinkCommands.Count)"
+          }
+
+          $missingObjects = @(
+            $expectedObjects | Where-Object {
+              $telegramLinkCommands[0].Content.IndexOf(
+                $_,
+                [StringComparison]::OrdinalIgnoreCase
+              ) -lt 0
+            }
+          )
+          if ($missingObjects.Count -gt 0) {
+            throw "APΩ objects missing from Telegram.exe linker command: $($missingObjects -join ', ')"
+          }
+
+          Write-Host "[PASS] Telegram.exe linker command contains all $($expectedObjects.Count) APΩ objects"
+          Write-Host "Link command: $($telegramLinkCommands[0].Path)"
           Get-FileHash $exe -Algorithm SHA256
           Get-Item $exe | Format-List FullName,Length,LastWriteTime
 
