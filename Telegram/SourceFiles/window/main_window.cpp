@@ -58,6 +58,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtGui/QWindow>
 #include <QtGui/QScreen>
 #include <QtGui/QDrag>
+#include <QtGui/QPainter>
+#include <QtGui/QFont>
 
 #include <kurlmimedata.h>
 
@@ -219,8 +221,30 @@ QIcon CreateIcon(Main::Session *session, bool returnNullIfDefault) {
 		return supportIcon;
 	}
 
+	// Retain the upstream paper plane; add a visible Ω badge so the fork
+	// cannot be mistaken for a second official Telegram window.
+	auto brandedImage = base::duplicate(Logo());
+	{
+		auto painter = QPainter(&brandedImage);
+		painter.setRenderHint(QPainter::Antialiasing, true);
+		const auto scale = brandedImage.width() / 256.0;
+		const auto badge = QRectF(
+			brandedImage.width() - 124 * scale,
+			brandedImage.height() - 124 * scale,
+			120 * scale,
+			120 * scale);
+		painter.setPen(QPen(QColor(255, 255, 255), 3 * scale));
+		painter.setBrush(QColor(90, 42, 170));
+		painter.drawEllipse(badge);
+		auto font = QFont(u"Segoe UI Symbol"_q);
+		font.setBold(true);
+		font.setPixelSize(std::max(12, qRound(83 * scale)));
+		painter.setFont(font);
+		painter.setPen(Qt::white);
+		painter.drawText(badge, Qt::AlignCenter, u"\u03A9"_q);
+	}
 	const auto officialIcon = QIcon(
-		Ui::PixmapFromImage(base::duplicate(Logo())));
+		Ui::PixmapFromImage(std::move(brandedImage)));
 
 	if constexpr (!Platform::IsLinux()) {
 		return officialIcon;
@@ -721,10 +745,11 @@ QString MainWindow::nativeTitleSuffix() const {
 	if constexpr (Core::BuildIsCanary) {
 		const auto title = titleWidget();
 		if (!title || title->isHidden()) {
-			return u" \u2022 "_q + Core::CanaryTitleLabel();
+			return u" \u2022 "_q + Core::CanaryTitleLabel()
+			+ u" \u2022 \u03A9-Telegram"_q;
 		}
 	}
-	return QString();
+	return u" \u2022 \u03A9-Telegram"_q;
 }
 
 void MainWindow::updateMinimumSize() {

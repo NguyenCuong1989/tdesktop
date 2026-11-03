@@ -8,6 +8,31 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_pts_waiter.h"
 
 #include "api/api_updates.h"
+#include "apo/apo_runtime.h"
+#include "main/main_session.h"
+
+#include <utility>
+
+namespace {
+
+template <typename Update>
+void RecordPtsHandlerReturned(
+		not_null<Api::Updates*> owner,
+		const Update &update,
+		const QString &dispatchMode) {
+	apo::HookServerUpdate(
+		QStringLiteral("PTS_HANDLER_RETURNED"),
+		QJsonObject{
+			{ QStringLiteral("constructor_id"),
+				static_cast<qint64>(update.type()) },
+			{ QStringLiteral("phase"),
+				QStringLiteral("PTS_HANDLER_RETURNED") },
+			{ QStringLiteral("dispatch_mode"), dispatchMode },
+		},
+		owner->session().userId().bare);
+}
+
+} // namespace
 
 PtsWaiter::PtsWaiter(not_null<Api::Updates*> owner) : _owner(owner) {
 }
@@ -57,25 +82,41 @@ void PtsWaiter::applySkippedUpdates(ChannelData *channel) {
 	}
 
 	++_applySkippedLevel;
-	for (auto i = _queue.cbegin(), e = _queue.cend(); i != e; ++i) {
-		switch (i->second) {
+	while (!_queue.empty()) {
+		const auto i = _queue.cbegin();
+		const auto key = i->first;
+		const auto type = i->second;
+		_queue.erase(i);
+		switch (type) {
 		case SkippedUpdate: {
-			_owner->applyUpdateNoPtsCheck(_updateQueue[i->first]);
+			const auto update = _updateQueue[key];
+			_updateQueue.erase(key);
+			_owner->applyUpdateNoPtsCheck(update);
+			RecordPtsHandlerReturned(_owner, update, u"queued"_q);
 		} break;
 		case SkippedUpdates: {
-			_owner->applyUpdatesNoPtsCheck(_updatesQueue[i->first]);
+			const auto updates = _updatesQueue[key];
+			_updatesQueue.erase(key);
+			_owner->applyUpdatesNoPtsCheck(updates);
+			RecordPtsHandlerReturned(_owner, updates, u"queued"_q);
 		} break;
 		}
 	}
 	--_applySkippedLevel;
 	clearSkippedUpdates();
+	// A native update can arrive synchronously while a queued handler runs.
+	// Apply it only after the earlier PTS batch has fully drained.
+	while (!_deferredApply.empty()) {
+		auto next = std::move(_deferredApply.front());
+		_deferredApply.pop_front();
+		next();
+	}
 }
 
 void PtsWaiter::clearSkippedUpdates() {
 	_queue.clear();
 	_updateQueue.clear();
 	_updatesQueue.clear();
-	_applySkippedLevel = 0;
 }
 
 bool PtsWaiter::updated(
@@ -124,12 +165,19 @@ bool PtsWaiter::updateAndApply(
 		int32 pts,
 		int32 count,
 		const MTPUpdates &updates) {
+	if (_applySkippedLevel) {
+		_deferredApply.emplace_back([this, channel, pts, count, updates] {
+			updateAndApply(channel, pts, count, updates);
+		});
+		return true;
+	}
 	if (!updated(channel, pts, count, updates)) {
 		return false;
 	}
 	if (!_waitingForSkipped || _queue.empty()) {
 		// Optimization - no need to put in queue and back.
 		_owner->applyUpdatesNoPtsCheck(updates);
+		RecordPtsHandlerReturned(_owner, updates, u"direct"_q);
 	} else {
 		_updatesQueue.emplace(ptsKey(SkippedUpdates, pts), updates);
 		applySkippedUpdates(channel);
@@ -142,12 +190,19 @@ bool PtsWaiter::updateAndApply(
 		int32 pts,
 		int32 count,
 		const MTPUpdate &update) {
+	if (_applySkippedLevel) {
+		_deferredApply.emplace_back([this, channel, pts, count, update] {
+			updateAndApply(channel, pts, count, update);
+		});
+		return true;
+	}
 	if (!updated(channel, pts, count, update)) {
 		return false;
 	}
 	if (!_waitingForSkipped || _queue.empty()) {
 		// Optimization - no need to put in queue and back.
 		_owner->applyUpdateNoPtsCheck(update);
+		RecordPtsHandlerReturned(_owner, update, u"direct"_q);
 	} else {
 		_updateQueue.emplace(ptsKey(SkippedUpdate, pts), update);
 		applySkippedUpdates(channel);
@@ -159,6 +214,12 @@ bool PtsWaiter::updateAndApply(
 		ChannelData *channel,
 		int32 pts,
 		int32 count) {
+	if (_applySkippedLevel) {
+		_deferredApply.emplace_back([this, channel, pts, count] {
+			updateAndApply(channel, pts, count);
+		});
+		return true;
+	}
 	if (!updated(channel, pts, count)) {
 		return false;
 	}

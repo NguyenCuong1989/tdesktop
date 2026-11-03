@@ -447,7 +447,7 @@ private:
 
 		void drop(not_null<DataType*> data);
 
-		void sendNotifications();
+		[[nodiscard]] int sendNotifications();
 
 	private:
 		static constexpr auto kCount = details::CountBit<Flag>() + 1;

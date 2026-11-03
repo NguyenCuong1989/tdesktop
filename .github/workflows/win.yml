@@ -48,7 +48,7 @@ jobs:
 
   windows:
     name: Windows
-    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || ((github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/nightly') && 'depot-windows-latest-16' || 'windows-latest') }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || ((startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/nightly') && 'depot-windows-latest-16' || 'windows-latest') }}
 
     strategy:
       matrix:
@@ -73,8 +73,9 @@ jobs:
     steps:
       - name: Prepare directories.
         run: |
-          mkdir %userprofile%\TBuild\Libraries
-          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          rem Store source, dependencies and compiler outputs on the workspace drive.
+          rem The old symlink redirected all writes to the smaller C: user profile.
+          if not exist "%GITHUB_WORKSPACE%\TBuild\Libraries" mkdir "%GITHUB_WORKSPACE%\TBuild\Libraries"
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries${{ matrix.arch == 'x64' && '\win64' || '' }}>>%GITHUB_ENV%
 
@@ -216,7 +217,7 @@ jobs:
 
       - name: Free up some disk space.
         shell: bash
-        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' -o -path '*/tdesktop_rust/out/src/*' ')' -type f ')' -o -empty ')' -delete
 
       - name: Telegram Desktop build.
         if: env.ONLY_CACHE == 'false'

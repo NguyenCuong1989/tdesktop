@@ -36,7 +36,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_ICON1               ICON                    "..\\art\\icon256.ico"
+IDI_ICON1               ICON                    "..\\art\\omega_icon256.ico"
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -60,11 +60,11 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "Telegram FZ-LLC"
-            VALUE "FileDescription", "Telegram Desktop"
+            VALUE "CompanyName", "Omega Telegram Project (independent fork)"
+            VALUE "FileDescription", "Omega Telegram Desktop - Native AP Omega Fork"
             VALUE "FileVersion", "7.3.1.0"
             VALUE "LegalCopyright", "Copyright (C) 2014-2026"
-            VALUE "ProductName", "Telegram Desktop"
+            VALUE "ProductName", "Omega Telegram Desktop"
             VALUE "ProductVersion", "7.3.1.0"
         END
     END

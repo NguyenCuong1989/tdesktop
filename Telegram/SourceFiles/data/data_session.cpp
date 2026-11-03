@@ -18,6 +18,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_user_names.h"
 #include "chat_helpers/stickers_lottie.h"
 #include "core/application.h"
+#include "apo/apo_state_bridge.h"
 #include "core/core_settings.h"
 #include "core/mime_type.h" // Core::IsMimeSticker
 #include "ui/image/image_location_factory.h" // Images::FromPhotoSize
@@ -3693,6 +3694,11 @@ rpl::producer<> Session::unreadBadgeChanges() const {
 
 void Session::notifyUnreadBadgeChanged() {
 	_unreadBadgeChanges.fire({});
+
+	// APΩ Choke Point: Inbound Session Unread Count State Projection Hook
+	apo::StateBridge::Instance().updateUnreadCount(
+		session().userId().bare,
+		unreadBadge());
 }
 
 void Session::updateRepliesReadTill(RepliesReadTillUpdate update) {

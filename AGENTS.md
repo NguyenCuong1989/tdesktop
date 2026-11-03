@@ -1,3 +1,5 @@
+> **Ω-Telegram MISSION LOCK — mandatory before all work:** Read `docs/omega-telegram-mission-lock.md` (from repository root) and follow its fixed A→B→C→D gates. Current body is NOT ACCEPTED. Do not introduce LLM, external controllers, parallel runtime or claim unverified PASS.
+
 # Agent Guide for Telegram Desktop
 
 This guide defines repository-wide instructions for coding agents working with the Telegram Desktop codebase.
