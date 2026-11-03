@@ -36,7 +36,13 @@ function Invoke-LedgerSmoke {
     [Parameter(Mandatory = $true)][string]$Path,
     [int]$TimeoutSeconds = 30
   )
-  $process = [System.Diagnostics.Process]::Start($exe, ('"{0}" "{1}"' -f $Mode, $Path))
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $exe
+  $startInfo.Arguments = ('"{0}" "{1}"' -f $Mode, $Path)
+  $startInfo.WorkingDirectory = $out
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $process = [System.Diagnostics.Process]::Start($startInfo)
   if (!$process.WaitForExit($TimeoutSeconds * 1000)) {
     $process.Kill()
     $process.WaitForExit()
