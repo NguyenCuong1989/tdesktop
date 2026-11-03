@@ -187,6 +187,14 @@ jobs:
           Get-FileHash $exe -Algorithm SHA256
           Get-Item $exe | Format-List FullName,Length,LastWriteTime
 
+      - name: Run APΩ ledger and StateBridge regression suite
+        shell: pwsh
+        run: |
+          $repo = "$env:TBUILD\$env:REPO_NAME"
+          $smoke = Join-Path $repo "Telegram\build\apo_ledger_smoke.ps1"
+          $output = Join-Path $repo "out\apo_ledger_smoke_ci"
+          & $smoke -OutputDirectory $output
+
       - name: Package native artifact
         run: |
           set OUT=%TBUILD%\%REPO_NAME%\out\Debug

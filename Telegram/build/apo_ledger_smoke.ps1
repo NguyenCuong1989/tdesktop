@@ -1,11 +1,47 @@
-param()
+param(
+  [string]$OutputDirectory
+)
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $qt = (Resolve-Path (Join-Path $repo '..\Libraries\win64\Qt-5.15.19')).Path
-$vcvars = 'C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
-if (!(Test-Path $vcvars)) { throw "MSVC 14.44 developer environment is missing" }
-$out = Join-Path $repo 'out\apo_ledger_smoke'
-New-Item -ItemType Directory -Path $out -Force | Out-Null
+$vsInstall = $env:VSINSTALLDIR
+if ([string]::IsNullOrWhiteSpace($vsInstall)) {
+  $vsWhereCandidates = @()
+  if (${env:ProgramFiles(x86)}) {
+    $vsWhereCandidates += Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+  }
+  if ($env:ProgramFiles) {
+    $vsWhereCandidates += Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe'
+  }
+  $vsWhere = $vsWhereCandidates |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
+  if ($vsWhere) {
+    $vsInstall = & $vsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+  }
+}
+if ([string]::IsNullOrWhiteSpace($vsInstall)) {
+  throw 'Visual Studio installation with MSVC x64 tools was not found'
+}
+$vcvars = Join-Path $vsInstall 'VC\Auxiliary\Build\vcvars64.bat'
+if (!(Test-Path -LiteralPath $vcvars)) {
+  throw "MSVC x64 developer environment is missing under: $vsInstall"
+}
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+  $OutputDirectory = Join-Path $repo 'out\apo_ledger_smoke'
+}
+$out = [IO.Path]::GetFullPath($OutputDirectory)
+$outRoot = [IO.Path]::GetFullPath((Join-Path $repo 'out')).TrimEnd('\') + '\'
+if (!$out.StartsWith($outRoot, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "Smoke output must remain inside the repository out directory: $out"
+}
+if (Test-Path -LiteralPath $out) {
+  if (@(Get-ChildItem -LiteralPath $out -Force).Count -gt 0) {
+    throw "Refusing to overwrite non-empty smoke output directory: $out"
+  }
+} else {
+  New-Item -ItemType Directory -Path $out -Force | Out-Null
+}
 $exe = Join-Path $out 'apo-ledger-smoke.exe'
 $source = Join-Path $PSScriptRoot 'apo_ledger_smoke.cpp'
 $ledger = Join-Path $out 'valid.jsonl'
